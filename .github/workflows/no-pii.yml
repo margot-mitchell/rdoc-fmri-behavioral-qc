@@ -1,0 +1,37 @@
+name: No participant data
+on:
+  push:
+    branches: [main]
+    # Tags need their own filter. A tag push does not match a `branches:`
+    # filter, so without this the workflow never ran on a tag and the
+    # history scan below could not fire -- the one scan that matters most,
+    # because a tag is what gets published.
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the scan on a tag checks history too, and a shallow
+          # clone would quietly check nothing.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Scan what is TRACKED, not the working tree: a local virtualenv or build
+      # artifact is not part of the release and would only produce noise.
+      - name: Scan tracked tree
+        run: |
+          mkdir -p .scan_export
+          git archive HEAD | tar -x -C .scan_export
+          python3 tools/scan_repo.py .scan_export --plain
+      # --plain is NOT passed here: it takes precedence over --history in
+      # scan_repo.py, so the two together scanned the working tree and reported
+      # a clean history without reading one. They are now mutually exclusive.
+      - name: Scan full history
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python3 tools/scan_repo.py . --history

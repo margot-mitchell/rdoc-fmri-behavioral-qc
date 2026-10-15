@@ -1,0 +1,38 @@
+name: QC tests
+
+# Runs the test suite on every code change, so a renamed metric or a broken flag
+# rule fails here instead of silently switching off a QC check. This repository
+# holds no participant data, so the suite runs on every push unconditionally.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Editable install rather than `-r requirements.txt`: it pulls the
+          # dependencies from pyproject.toml AND exercises the package metadata,
+          # so a packaging regression (a missing __init__.py, a bad `packages`
+          # entry) fails here instead of silently shipping a broken wheel.
+          # The data-processing workflows deliberately still use requirements.txt
+          # and run from the repo root; this job is the one that checks packaging.
+          pip install -e ".[dev]"
+
+      - name: Run QC tests
+        run: python -m pytest -rx

@@ -1,0 +1,734 @@
+name: Process Data
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      subject_folder:
+        description: 'Subject folder to process (e.g., sub-sM) - use for single subject/session processing'
+        required: false
+        type: string
+      session_names:
+        description: 'Comma-separated list of sessions to process (e.g., ses-1,ses-2) - leave empty to process all sessions for the subject'
+        required: false
+        type: string
+      process_all:
+        description: 'Process all subjects in parallel (leave unchecked if you use specific_subjects or subject_folder)'
+        required: false
+        type: boolean
+        default: false
+      specific_subjects:
+        description: 'Process specific subjects (comma-separated list, e.g., sub-sM,sub-sN,sub-sO) - leave empty if using other options'
+        required: false
+        type: string
+      save_to_git:
+        description: 'Save results to git repository (default: true)'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  get-subjects:
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    outputs:
+      subjects: ${{ steps.get-subjects.outputs.subjects }}
+      sessions: ${{ steps.get-subjects.outputs.sessions }}
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone --version
+      
+      - name: Configure rclone
+        run: |
+          echo "Setting up rclone configuration..."
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+          
+      - name: List available subjects and sessions
+        run: |
+          echo "Listing available subjects and sessions from Dropbox..."
+          mkdir -p output/raw
+          
+          # List all subjects in Dropbox
+          echo "Available subjects:"
+          rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/ | grep "sub-" || echo "No subjects found"
+          
+          # Also show the full directory listing to see the structure
+          echo "Full directory listing:"
+          rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/ || echo "Could not list directory"
+          
+      - name: Get subject and session list
+        id: get-subjects
+        run: |
+          # Prefer explicit subject list over "process all" so a filled specific_subjects
+          # field is never ignored if process_all is also true (UI / dispatch quirks).
+          if [ -n "${{ github.event.inputs.specific_subjects }}" ]; then
+            subjects=$(echo "${{ github.event.inputs.specific_subjects }}" | tr ',' '\n' | grep -v '^[[:space:]]*$' | jq -R -s -c 'split("\n")[:-1]')
+            echo "subjects=$subjects" >> $GITHUB_OUTPUT
+            echo "sessions=[\"\"]" >> $GITHUB_OUTPUT
+            echo "Processing specific subjects: $subjects"
+          elif [ "${{ github.event.inputs.process_all }}" = "true" ]; then
+            # Get all subjects from Dropbox without downloading
+            # rclone lsd: dirname is the last field; $2 is typically the date, not sub-s*
+            subjects=$(rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/ | grep "sub-" | awk '{print $NF}' | jq -R -s -c 'split("\n")[:-1]')
+            echo "subjects=$subjects" >> $GITHUB_OUTPUT
+            echo "sessions=[\"\"]" >> $GITHUB_OUTPUT
+            echo "Processing all subjects: $subjects"
+          elif [ -n "${{ github.event.inputs.subject_folder }}" ]; then
+            subject="${{ github.event.inputs.subject_folder }}"
+            session_names="${{ github.event.inputs.session_names }}"
+            if [ -n "$session_names" ]; then
+              # Parse comma-separated list into JSON array, filter out empty or whitespace-only strings
+              IFS=',' read -ra session_arr <<< "$session_names"
+              sessions=$(printf '%s\n' "${session_arr[@]}" | grep -v '^[[:space:]]*$' | jq -R -s -c 'split("\n")[:-1]')
+              echo "subjects=[\"$subject\"]" >> $GITHUB_OUTPUT
+              echo "sessions=$sessions" >> $GITHUB_OUTPUT
+              echo "Processing single subject and sessions: $subject/$sessions"
+            else
+              # Get all sessions for this subject from Dropbox without downloading
+              echo "Getting available sessions for $subject from Dropbox..."
+              echo "Checking path: ${{ vars.RCLONE_REMOTE }}/output/raw/$subject/"
+              
+              # First check if the subject directory exists
+              echo "Checking if subject directory exists in Dropbox..."
+              echo "Testing path: ${{ vars.RCLONE_REMOTE }}/output/raw/$subject/"
+              
+              # List the subject directory to see what's there
+              echo "Contents of subject directory:"
+              subject_contents=$(rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/$subject/ 2>&1)
+              echo "$subject_contents"
+              
+              if rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/ | grep -q "^.*$subject"; then
+                echo "Subject directory found: $subject"
+                # Get sessions using rclone lsd to get directory names directly
+                echo "Running rclone lsd command to get session directories..."
+                rclone_output=$(rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/$subject/ 2>&1)
+                echo "Rclone output: $rclone_output"
+                
+                # Extract session directory names from the output, excluding prescan, anat, practice, and pretouch sessions
+                available_sessions=$(echo "$rclone_output" | awk '{print $NF}' | grep "^ses-" | grep -v "prescan" | grep -v "anat" | grep -v "practice" | grep -v "pretouch" | sort -u | jq -R -s -c 'split("\n")[:-1]' || echo '[]')
+                echo "Available sessions (excluding prescan/anat/practice/pretouch): $available_sessions"
+                
+                # Debug session detection
+                echo "Raw rclone output:"
+                echo "$rclone_output"
+                echo ""
+                echo "All detected sessions (before filtering):"
+                all_sessions=$(echo "$rclone_output" | awk '{print $NF}' | grep "^ses-" | sort -u)
+                echo "$all_sessions"
+                echo ""
+                echo "Sessions after filtering (excluding prescan/anat/practice/pretouch):"
+                filtered_sessions=$(echo "$all_sessions" | grep -v "prescan" | grep -v "anat" | grep -v "practice" | grep -v "pretouch")
+                echo "$filtered_sessions"
+                echo ""
+                
+                # Validate that we found sessions
+                if [ "$available_sessions" = "[]" ]; then
+                  echo "WARNING: No valid sessions found for $subject after filtering"
+                  echo "This could mean the subject only has prescan/anat/practice/pretouch sessions"
+                fi
+              else
+                echo "ERROR: Subject directory not found: $subject"
+                echo "Available subjects:"
+                rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/ | grep "sub-" || echo "No subjects found"
+                exit 1
+              fi
+              
+              echo "subjects=[\"$subject\"]" >> $GITHUB_OUTPUT
+              echo "sessions=$available_sessions" >> $GITHUB_OUTPUT
+              echo "Processing single subject (all sessions): $subject with sessions: $available_sessions"
+            fi
+          else
+            echo "Error: No valid option selected. Fill one of: specific_subjects (comma list), process_all (true), or subject_folder"
+            exit 1
+          fi
+
+  process-data-matrix:
+    needs: get-subjects
+    if: github.event.inputs.session_names != '' && github.event.inputs.session_names != null
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    strategy:
+      matrix:
+        subject: ${{ fromJson(needs.get-subjects.outputs.subjects) }}
+        session: ${{ fromJson(needs.get-subjects.outputs.sessions) }}
+      fail-fast: false  # Continue processing other subjects if one fails
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone --version
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          
+      - name: Create virtual environment
+        run: |
+          echo "Creating virtual environment..."
+          python -m venv .venv
+          echo "Activating virtual environment..."
+          source .venv/bin/activate
+          echo "Python path:"
+          which python
+          echo "Installing pip in virtual environment..."
+          curl -sS https://bootstrap.pypa.io/get-pip.py | python
+          echo "Installing requirements..."
+          pip install -r requirements.txt
+
+      - name: Run QC tests
+        run: |
+          source .venv/bin/activate
+          pip install pytest
+          # Stop before processing if a flag rule or metric definition is broken
+          python -m pytest -q
+
+      - name: Configure rclone
+        run: |
+          echo "Setting up rclone configuration..."
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+          
+          echo "Verifying rclone configuration..."
+          echo "Configuration file exists:"
+          ls -l ~/.config/rclone/rclone.conf
+          echo "Configuration file contents (without sensitive data):"
+          grep -v "token" ~/.config/rclone/rclone.conf
+          echo "Available remotes:"
+          rclone listremotes
+          
+      - name: Test Dropbox connection
+        run: |
+          echo "Testing Dropbox connection..."
+          rclone lsd ${{ vars.RCLONE_REMOTE }} || {
+            echo "Error: Could not list Dropbox root directory"
+            exit 1
+          }
+          echo "Successfully connected to Dropbox"
+          
+          # List what's available for the specific subject
+          if [ -n "${{ matrix.subject }}" ]; then
+            echo "Available sessions for ${{ matrix.subject }} in Dropbox:"
+            rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/${{ matrix.subject }}/ 2>/dev/null || echo "Subject not found in Dropbox"
+          fi
+          
+      - name: Create directory structure
+        run: |
+          echo "Creating required directories..."
+          mkdir -p output/raw
+          mkdir -p preprocessed_data
+          mkdir -p results
+          echo "Directory structure created:"
+          tree -L 2
+          
+      - name: Sync data from Dropbox
+        timeout-minutes: 15
+        run: |
+          source .venv/bin/activate
+          echo "Syncing data from Dropbox..."
+          
+          if [ -n "${{ matrix.session }}" ] && [ "${{ matrix.session }}" != "" ]; then
+            # Sync only the specific session
+            echo "Syncing only session ${{ matrix.session }} for ${{ matrix.subject }}"
+            mkdir -p output/raw/${{ matrix.subject }}
+            
+            # Debug: Show the exact command
+            SOURCE_PATH="${{ vars.RCLONE_REMOTE }}/output/raw/${{ matrix.subject }}/${{ matrix.session }}/"
+            DEST_PATH="output/raw/${{ matrix.subject }}/${{ matrix.session }}/"
+            
+            # Clean up any potential whitespace issues
+            SOURCE_PATH=$(echo "$SOURCE_PATH" | tr -d ' ')
+            DEST_PATH=$(echo "$DEST_PATH" | tr -d ' ')
+            
+            echo "Source: '$SOURCE_PATH'"
+            echo "Dest: '$DEST_PATH'"
+            echo "Executing: rclone sync '$SOURCE_PATH' '$DEST_PATH' --progress"
+            
+            rclone sync "$SOURCE_PATH" "$DEST_PATH" --progress
+          else
+            # Sync only the specific subject folder (not all subjects)
+            echo "Syncing subject folder for ${{ matrix.subject }}"
+            mkdir -p output/raw/${{ matrix.subject }}
+            rclone sync ${{ vars.RCLONE_REMOTE }}/output/raw/${{ matrix.subject }}/ output/raw/${{ matrix.subject }}/ --progress
+          fi
+          
+          echo "Verifying sync completed..."
+          echo "Contents of output/raw:"
+          ls -la output/raw/
+          
+          if [ -n "${{ matrix.subject }}" ]; then
+            echo "Contents of ${{ matrix.subject }} directory:"
+            ls -la output/raw/${{ matrix.subject }}/ || echo "Subject directory not found"
+          fi
+          
+          if [ -n "${{ matrix.session }}" ] && [ "${{ matrix.session }}" != "" ]; then
+            echo "Checking for session ${{ matrix.session }} in ${{ matrix.subject }}:"
+            ls -la output/raw/${{ matrix.subject }}/${{ matrix.session }}/ 2>/dev/null || echo "Session directory not found"
+          fi
+          
+      - name: Check session validity
+        run: |
+          echo "Checking session validity..."
+          echo "Subject: '${{ matrix.subject }}'"
+          echo "Session: '${{ matrix.session }}'"
+          
+          # Debug matrix values
+          echo "Matrix subject: '${{ matrix.subject }}'"
+          echo "Matrix session: '${{ matrix.session }}'"
+          
+          # Only check for empty sessions when we're supposed to be processing specific sessions
+          # Empty sessions are valid when processing all sessions for a subject
+          if [ "${{ github.event.inputs.subject_folder }}" != "" ] && [ "${{ github.event.inputs.session_names }}" != "" ]; then
+            if [ -z "${{ matrix.session }}" ] || [ "${{ matrix.session }}" = "" ] || [ "${{ matrix.session }}" = "null" ]; then
+              echo "ERROR: Empty session name detected when processing specific sessions."
+              echo "This should not happen with proper filtering."
+              echo "Exiting to prevent artifact directory issues."
+              exit 1
+            fi
+          fi
+          
+          echo "Session is valid, proceeding with processing..."
+          
+      - name: Filter empty sessions
+        run: |
+          echo "Filtering empty sessions from matrix..."
+          echo "Matrix subject: '${{ matrix.subject }}'"
+          echo "Matrix session: '${{ matrix.session }}'"
+          echo "Input subject_folder: '${{ github.event.inputs.subject_folder }}'"
+          echo "Input session_names: '${{ github.event.inputs.session_names }}'"
+          
+          # Only filter empty sessions when processing specific sessions
+          # Empty sessions are valid when processing all sessions for a subject
+          if [ "${{ github.event.inputs.subject_folder }}" != "" ] && [ "${{ github.event.inputs.session_names }}" != "" ]; then
+            if [ -z "${{ matrix.session }}" ] || [ "${{ matrix.session }}" = "" ] || [ "${{ matrix.session }}" = "null" ] || [ "${{ matrix.session }}" = " " ]; then
+              echo "ERROR: Empty session detected when processing specific sessions. Skipping this job."
+              echo "This indicates an issue with the matrix generation."
+              exit 1
+            fi
+          fi
+          
+          # Check for invalid session names (like dates)
+          if [[ "${{ matrix.session }}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
+            echo "ERROR: Invalid session name detected: '${{ matrix.session }}' (looks like a date)"
+            echo "This indicates an issue with the rclone session detection."
+            exit 1
+          fi
+          
+          echo "Session is valid: '${{ matrix.session }}'"
+          
+      - name: Clear Python cache
+        run: |
+          echo "Clearing Python cache to ensure latest code is used..."
+          find rdocfmriqc -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          find rdocfmriqc -name "*.pyc" -delete 2>/dev/null || true
+          echo "Cache cleared"
+          
+      - name: Process subject ${{ matrix.subject }} session ${{ matrix.session }}
+        timeout-minutes: 30
+        run: |
+          source .venv/bin/activate
+          echo "Processing subject: ${{ matrix.subject }}"
+          
+          # Set PYTHONPATH to include current directory for rdocfmriqc imports
+          export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+          
+          if [ -n "${{ matrix.session }}" ] && [ "${{ matrix.session }}" != "" ]; then
+            echo "Processing specific session: ${{ matrix.session }}"
+            python -m rdocfmriqc.analyze.preprocess ${{ matrix.subject }} --session ${{ matrix.session }} || { echo "ERROR: Preprocessing failed"; exit 1; }
+            python -m rdocfmriqc.analyze.calculate_metrics ${{ matrix.subject }} --session ${{ matrix.session }} || { echo "ERROR: Metrics calculation failed"; exit 1; }
+            python -m rdocfmriqc.analyze.generate_flags ${{ matrix.subject }} --session ${{ matrix.session }} || { echo "ERROR: Flag generation failed"; exit 1; }
+          else
+            echo "Processing all sessions for subject"
+            python -m rdocfmriqc.analyze.preprocess ${{ matrix.subject }} || { echo "ERROR: Preprocessing failed"; exit 1; }
+            python -m rdocfmriqc.analyze.calculate_metrics ${{ matrix.subject }} || { echo "ERROR: Metrics calculation failed"; exit 1; }
+            python -m rdocfmriqc.analyze.generate_flags ${{ matrix.subject }} || { echo "ERROR: Flag generation failed"; exit 1; }
+          fi
+          
+      - name: Verify results
+        run: |
+          echo "Verifying results for ${{ matrix.subject }}..."
+          
+          # Results are already in BIDS format from Python scripts
+          if [ -n "${{ matrix.session }}" ] && [ "${{ matrix.session }}" != "" ]; then
+            echo "Session-specific processing: ${{ matrix.session }}"
+            echo "Contents of results/${{ matrix.subject }}/${{ matrix.session }}:"
+            ls -la results/${{ matrix.subject }}/${{ matrix.session }}/ || echo "Directory does not exist"
+            
+            if [ -d "results/${{ matrix.subject }}/${{ matrix.session }}/metrics" ]; then
+              echo "Metrics files:"
+              ls -la results/${{ matrix.subject }}/${{ matrix.session }}/metrics/
+            fi
+            
+            if [ -d "results/${{ matrix.subject }}/${{ matrix.session }}/flags" ]; then
+              echo "Flags files:"
+              ls -la results/${{ matrix.subject }}/${{ matrix.session }}/flags/
+            fi
+          else
+            echo "All sessions processing"
+            echo "Contents of results/${{ matrix.subject }}:"
+            find results/${{ matrix.subject }} -type f || echo "No files found"
+          fi
+          
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.subject }}_results
+          path: results/${{ matrix.subject }}/
+          if-no-files-found: warn
+          
+      - name: Upload results for git saving
+        if: always() && (github.event.inputs.save_to_git != 'false')
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-results-${{ matrix.subject }}-${{ matrix.session }}
+          path: results/${{ matrix.subject }}/${{ matrix.session }}/
+          if-no-files-found: warn
+
+  process-data-sequential:
+    needs: get-subjects
+    # Runs when not using explicit per-session matrix mode. Includes:
+    # - single subject_folder (all sessions), OR
+    # - process_all, OR
+    # - specific_subjects (comma-separated list) — get-subjects sets sessions to [""] so
+    #   process-data-matrix does not run unless session_names is filled; without this,
+    #   multi-subject / process-all would skip all processing after get-subjects.
+    if: ${{ (github.event.inputs.session_names == '' || github.event.inputs.session_names == null) && (github.event.inputs.subject_folder != '' || github.event.inputs.process_all == 'true' || (github.event.inputs.specific_subjects != '' && github.event.inputs.specific_subjects != null)) }}
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    strategy:
+      matrix:
+        subject: ${{ fromJson(needs.get-subjects.outputs.subjects) }}
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone --version
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          
+      - name: Create virtual environment
+        run: |
+          echo "Creating virtual environment..."
+          python -m venv .venv
+          echo "Activating virtual environment..."
+          source .venv/bin/activate
+          echo "Python path:"
+          which python
+          echo "Installing pip in virtual environment..."
+          curl -sS https://bootstrap.pypa.io/get-pip.py | python
+          echo "Installing requirements..."
+          pip install -r requirements.txt
+
+      - name: Run QC tests
+        run: |
+          source .venv/bin/activate
+          pip install pytest
+          # Stop before processing if a flag rule or metric definition is broken
+          python -m pytest -q
+
+      - name: Configure rclone
+        run: |
+          echo "Setting up rclone configuration..."
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+          
+      - name: Clear Python cache
+        run: |
+          echo "Clearing Python cache to ensure latest code is used..."
+          find rdocfmriqc -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          find rdocfmriqc -name "*.pyc" -delete 2>/dev/null || true
+          echo "Cache cleared"
+          
+      - name: Detect and process all sessions for subject
+        run: |
+          echo "Detecting all sessions for ${{ matrix.subject }} from Dropbox..."
+          
+          # First, let's verify the subject exists and check the path structure
+          echo "Checking if subject directory exists..."
+          echo "Testing path: ${{ vars.RCLONE_REMOTE }}/output/raw/${{ matrix.subject }}/"
+          
+          # List the subject directory to see what's there
+          echo "Contents of subject directory:"
+          rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/${{ matrix.subject }}/ 2>&1 || echo "Subject directory not found or inaccessible"
+          
+          # Also try without the trailing slash
+          echo "Contents of subject directory (no trailing slash):"
+          rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/${{ matrix.subject }} 2>&1 || echo "Subject directory not found or inaccessible"
+          
+          # Get sessions using rclone lsd to get directory names directly
+          echo "Running rclone lsd command to get session directories..."
+          rclone_output=$(rclone lsd ${{ vars.RCLONE_REMOTE }}/output/raw/${{ matrix.subject }}/ 2>&1)
+          echo "Rclone output: $rclone_output"
+          
+          # Extract session directory names from the output, excluding prescan, anat, practice, and pretouch sessions
+          available_sessions=$(echo "$rclone_output" | awk '{print $NF}' | grep "^ses-" | grep -v "prescan" | grep -v "anat" | grep -v "practice" | grep -v "pretouch" | sort -u)
+          echo "Available sessions (excluding prescan/anat/practice/pretouch): $available_sessions"
+          
+          # Debug session detection
+          echo "Raw rclone output:"
+          echo "$rclone_output"
+          echo ""
+          echo "All detected sessions (before filtering):"
+          all_sessions=$(echo "$rclone_output" | awk '{print $NF}' | grep "^ses-" | sort -u)
+          echo "$all_sessions"
+          echo ""
+          echo "Sessions after filtering (excluding prescan/anat/practice/pretouch):"
+          filtered_sessions=$(echo "$all_sessions" | grep -v "prescan" | grep -v "anat" | grep -v "practice" | grep -v "pretouch")
+          echo "$filtered_sessions"
+          echo ""
+          
+          # Validate that we found sessions
+          if [ -z "$available_sessions" ]; then
+            echo "ERROR: No valid sessions found for ${{ matrix.subject }} after filtering"
+            echo "This could mean:"
+            echo "1. The subject only has prescan/anat/practice/pretouch sessions (which are excluded)"
+            echo "2. The subject has no sessions at all"
+            echo "3. There's an issue with the session detection logic"
+            echo ""
+            echo "Exiting workflow - no valid sessions to process"
+            exit 1
+          fi
+          
+          # Process each session sequentially
+          for session in $available_sessions; do
+            echo "Processing session: $session"
+            echo "Processing ${{ matrix.subject }}/$session"
+            
+            # Create directory structure
+            mkdir -p output/raw
+            mkdir -p preprocessed_data
+            mkdir -p results
+            
+            # Sync data from Dropbox
+            echo "Syncing data for ${{ matrix.subject }}/$session"
+            rclone sync ${{ vars.RCLONE_REMOTE }}/output/raw/${{ matrix.subject }}/$session/ output/raw/${{ matrix.subject }}/$session/ --progress
+            
+            # Process data
+            echo "Processing ${{ matrix.subject }} session $session"
+            source .venv/bin/activate
+            export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+            
+            python -m rdocfmriqc.analyze.preprocess ${{ matrix.subject }} --session $session
+            python -m rdocfmriqc.analyze.calculate_metrics ${{ matrix.subject }} --session $session
+            python -m rdocfmriqc.analyze.generate_flags ${{ matrix.subject }} --session $session
+            
+            echo "Completed processing for ${{ matrix.subject }}/$session"
+          done
+          
+          echo "All sessions processed for ${{ matrix.subject }}"
+          
+          # Verify results are in BIDS format (already created by Python scripts)
+          echo "Verifying results for ${{ matrix.subject }}..."
+          echo "Contents of results/${{ matrix.subject }}:"
+          find results/${{ matrix.subject }} -type f || echo "No files found"
+          
+      - name: Prepare artifact with proper structure
+        if: always() && (github.event.inputs.save_to_git != 'false')
+        run: |
+          echo "Creating artifact with proper directory structure..."
+          mkdir -p artifact-upload
+          cp -r results/${{ matrix.subject }} artifact-upload/
+          echo "Artifact structure:"
+          ls -la artifact-upload/
+          
+      - name: Upload results artifact for git saving
+        if: always() && (github.event.inputs.save_to_git != 'false')
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-results-sequential-${{ matrix.subject }}
+          path: artifact-upload/
+
+  save-results-to-git-matrix:
+    needs: [get-subjects, process-data-matrix]
+    if: always() && (github.event.inputs.save_to_git != 'false') && github.event.inputs.session_names != '' && github.event.inputs.session_names != null
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Download all result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: git-results-*
+          path: downloaded-artifacts/
+          
+      - name: Organize results for commit
+        run: |
+          echo "Organizing all downloaded results..."
+          mkdir -p results
+          
+          # Move all artifacts to the results directory in their proper BIDS structure
+          for artifact_dir in downloaded-artifacts/git-results-*/; do
+            if [ -d "$artifact_dir" ]; then
+              artifact_name=$(basename "$artifact_dir")
+              echo "Processing artifact: $artifact_name"
+              
+              # Parse artifact name: git-results-<BIDS subject>-<BIDS session>
+              # Same logic as weekly_automated_processing.yml (avoids greedy sed and supports any ses-* label).
+              if [[ "$artifact_name" != git-results-sub-* ]]; then
+                echo "Skipping unexpected artifact name: $artifact_name"
+                continue
+              fi
+              rest="${artifact_name#git-results-}"
+              if [[ "$rest" != *"-ses-"* ]]; then
+                echo "ERROR: no -ses- segment in artifact name: $artifact_name"
+                continue
+              fi
+              subject="${rest%-ses-*}"
+              session_suffix="${rest#"$subject"}"
+              session="${session_suffix#-}"
+              if [[ -z "$subject" ]] || [[ -z "$session" ]] || [[ "$session" != ses-* ]]; then
+                echo "ERROR: could not parse subject/session from $artifact_name (subject='$subject' session='$session')"
+                continue
+              fi
+              echo "Subject: $subject, Session: $session"
+              
+              # Create the BIDS structure and copy files
+              mkdir -p "results/$subject/$session"
+              cp -r "$artifact_dir"/* "results/$subject/$session/" 2>/dev/null || true
+            fi
+          done
+          
+          echo "All results organized. Directory structure:"
+          ls -la results/ || echo "Results directory is empty"
+          
+      - name: Save results to git repository
+        timeout-minutes: 10
+        run: |
+          echo "Saving all results to git repository..."
+          
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Show what we're about to commit
+          echo "Results directory structure:"
+          find results/ -type f || echo "No files found"
+          
+          # Add all results
+          git add results/
+          
+          # Check if there are any changes
+          if ! git diff --staged --quiet; then
+            # Create commit message
+            git commit -m "Update results: Manual Process Data Workflow - Run ${{ github.run_id }} - $(date '+%Y-%m-%d %H:%M')"
+            
+            echo "Committed changes for all sessions"
+            
+            # Push changes (single push, no race condition)
+            echo "Pushing changes to repository..."
+            git push origin main || {
+              echo "Push failed, pulling and retrying once..."
+              git pull --rebase origin main
+              git push origin main
+            }
+            
+            echo "Successfully pushed all results"
+          else
+            echo "No changes to commit"
+          fi
+          
+          echo "Results saved to main branch in /results directory"
+
+  save-results-to-git-sequential:
+    needs: [get-subjects, process-data-sequential]
+    if: ${{ always() && (github.event.inputs.save_to_git != 'false') && (github.event.inputs.session_names == '' || github.event.inputs.session_names == null) && (github.event.inputs.subject_folder != '' || github.event.inputs.process_all == 'true' || (github.event.inputs.specific_subjects != '' && github.event.inputs.specific_subjects != null)) }}
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Download all result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: git-results-sequential-*
+          path: downloaded-artifacts/
+          
+      - name: Organize results for commit
+        run: |
+          echo "Organizing all downloaded results..."
+          mkdir -p results
+          
+          # Move all artifacts to the results directory in their proper BIDS structure
+          for artifact_dir in downloaded-artifacts/git-results-sequential-*/; do
+            if [ -d "$artifact_dir" ]; then
+              artifact_name=$(basename "$artifact_dir")
+              echo "Processing artifact: $artifact_name"
+              
+              # The artifact already contains the sub-X structure, so just copy it
+              cp -r "$artifact_dir"/* results/ 2>/dev/null || true
+            fi
+          done
+          
+          echo "All results organized. Directory structure:"
+          ls -la results/ || echo "Results directory is empty"
+      
+      - name: Save results to git repository
+        timeout-minutes: 10
+        run: |
+          echo "Saving all results to git repository..."
+          
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Show what we're about to commit
+          echo "Results directory structure:"
+          find results/ -type f || echo "No files found"
+          
+          # Add all results
+          git add results/
+          
+          # Check if there are any changes
+          if ! git diff --staged --quiet; then
+            git commit -m "Update results: Manual Process Data Workflow (all sessions) - Run ${{ github.run_id }} - $(date '+%Y-%m-%d %H:%M')"
+            echo "Committed changes for all subjects"
+            
+            # Push changes (single push, no race condition)
+            echo "Pushing changes to repository..."
+            git push origin main || {
+              echo "Push failed, pulling and retrying once..."
+              git pull --rebase origin main
+              git push origin main
+            }
+            
+            echo "Successfully pushed all results"
+          else
+            echo "No changes to commit"
+          fi
+          
+          echo "Results saved to main branch in /results directory" 

@@ -1,0 +1,9 @@
+# Kept in sync with [project.dependencies] in pyproject.toml.
+# Direct dependencies only -- see the comments there for why the former
+# pip-freeze entries (six, pytz, tzdata, python-dateutil, typing-extensions,
+# python-json-logger, tqdm) were removed.
+numpy>=2.2.6
+pandas>=2.2.3
+polars>=1.30.0
+pydantic>=1.10.22
+pyarrow>=15.0.0

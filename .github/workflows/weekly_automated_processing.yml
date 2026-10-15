@@ -1,0 +1,487 @@
+name: Weekly Automated Data Processing
+
+permissions:
+  contents: write
+
+on:
+  # The schedule: block is removed in the public mirror. The private repo runs
+  # this weekly; a public fork must never attempt to.
+  workflow_dispatch: # Allow manual triggering
+    inputs:
+      save_to_git:
+        description: 'Save results to git repository (default: true)'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  detect-new-data:
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    outputs:
+      new-subjects: ${{ steps.detect-subjects.outputs.new-subjects }}
+      new-sessions: ${{ steps.detect-subjects.outputs.new-sessions }}
+      has-new-data: ${{ steps.detect-subjects.outputs.has-new-data }}
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone --version
+      
+      - name: Configure rclone
+        run: |
+          echo "Setting up rclone configuration..."
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+          
+      - name: Detect new data from past week
+        id: detect-subjects
+        run: |
+          echo "Detecting new data from the past week..."
+          
+          # Determine if this is a manual run or scheduled run
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual run: check last 7 days
+            END_DATE=$(date +%Y-%m-%d)
+            START_DATE=$(date -d "7 days ago" +%Y-%m-%d)
+            echo "Manual run detected - checking last 7 days"
+          else
+            # Scheduled run (Sunday): check from last Sunday to this Sunday
+            END_DATE=$(date +%Y-%m-%d)
+            START_DATE=$(date -d "last Sunday" +%Y-%m-%d)
+            echo "Scheduled run detected - checking from last Sunday to this Sunday"
+          fi
+          
+          echo "Checking for data modified between $START_DATE and $END_DATE (inclusive)"
+          echo "Current date: $(date)"
+          echo "Run type: ${{ github.event_name }}"
+          
+          # Create temporary directory for sync
+          mkdir -p temp_sync/raw
+          
+          # Sync data from Dropbox to check for new files
+          rclone sync ${{ vars.RCLONE_REMOTE }}/output/raw/ temp_sync/raw/ --progress
+          
+          # Find subjects with data modified in the past week
+          NEW_SUBJECTS=()
+          NEW_SESSIONS=()
+          
+          # Check each subject directory for recent modifications
+          for subject_dir in temp_sync/raw/sub-*; do
+            if [ -d "$subject_dir" ]; then
+              subject=$(basename "$subject_dir")
+              echo "Checking subject: $subject"
+              
+              # Check if any files in this subject directory were modified in the past week
+              # Use -newermt for start date and -not -newermt for end date (exclusive)
+              # Add 1 day to END_DATE to make it inclusive
+              END_DATE_PLUS_ONE=$(date -d "$END_DATE + 1 day" +%Y-%m-%d)
+              echo "Looking for files modified between $START_DATE and $END_DATE_PLUS_ONE"
+              
+              if find "$subject_dir" -type f -newermt "$START_DATE" -not -newermt "$END_DATE_PLUS_ONE" | grep -q .; then
+                NEW_SUBJECTS+=("$subject")
+                echo "Found new data in subject: $subject"
+                
+                # Check for new sessions within this subject (excluding prescan, anat, practice, and pretouch sessions)
+                for session_dir in "$subject_dir"/ses-*; do
+                  if [ -d "$session_dir" ]; then
+                    session=$(basename "$session_dir")
+                    
+                    # Skip sessions that contain "prescan", "anat", "practice", or "pretouch" in the name
+                    if [[ "$session" == *"prescan"* ]] || [[ "$session" == *"anat"* ]] || [[ "$session" == *"practice"* ]] || [[ "$session" == *"pretouch"* ]]; then
+                      echo "Skipping excluded session: $session"
+                      continue
+                    fi
+                    
+                    # Check if this session has new data
+                    if find "$session_dir" -type f -newermt "$START_DATE" -not -newermt "$END_DATE_PLUS_ONE" | grep -q .; then
+                      NEW_SESSIONS+=("$subject/$session")
+                      echo "Found new data in session: $subject/$session"
+                      
+                      # Debug: show some file modification times
+                      echo "Recent files in $subject/$session:"
+                      find "$session_dir" -type f -newermt "$START_DATE" -not -newermt "$END_DATE_PLUS_ONE" -exec ls -la {} \; | head -5
+                    fi
+                  fi
+                done
+              fi
+            fi
+          done
+          
+          # Convert arrays to JSON for GitHub Actions
+          if [ ${#NEW_SUBJECTS[@]} -gt 0 ]; then
+            subjects_json=$(printf '%s\n' "${NEW_SUBJECTS[@]}" | jq -R -s -c 'split("\n")[:-1]')
+            sessions_json=$(printf '%s\n' "${NEW_SESSIONS[@]}" | jq -R -s -c 'split("\n")[:-1]')
+            echo "has-new-data=true" >> $GITHUB_OUTPUT
+            echo "new-subjects=$subjects_json" >> $GITHUB_OUTPUT
+            echo "new-sessions=$sessions_json" >> $GITHUB_OUTPUT
+            echo "start-date=$START_DATE" >> $GITHUB_OUTPUT
+            echo "end-date=$END_DATE" >> $GITHUB_OUTPUT
+            echo "Found new data for subjects: ${NEW_SUBJECTS[*]}"
+            echo "Found new sessions (excluding prescan/anat/practice/pretouch): ${NEW_SESSIONS[*]}"
+          else
+            echo "has-new-data=false" >> $GITHUB_OUTPUT
+            echo "new-subjects=[]" >> $GITHUB_OUTPUT
+            echo "new-sessions=[]" >> $GITHUB_OUTPUT
+            echo "start-date=$START_DATE" >> $GITHUB_OUTPUT
+            echo "end-date=$END_DATE" >> $GITHUB_OUTPUT
+            echo "No new data found in the past week (excluding prescan/anat/practice/pretouch sessions)"
+          fi
+          
+          # Clean up
+          rm -rf temp_sync
+
+  process-new-data:
+    needs: detect-new-data
+    if: needs.detect-new-data.outputs.has-new-data == 'true'
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    strategy:
+      matrix:
+        subject-session: ${{ fromJson(needs.detect-new-data.outputs.new-sessions) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Install rclone
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone --version
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          
+      - name: Create virtual environment
+        run: |
+          echo "Creating virtual environment..."
+          python -m venv .venv
+          echo "Activating virtual environment..."
+          source .venv/bin/activate
+          echo "Python path:"
+          which python
+          echo "Installing pip in virtual environment..."
+          curl -sS https://bootstrap.pypa.io/get-pip.py | python
+          echo "Installing requirements..."
+          pip install -r requirements.txt
+
+      - name: Run QC tests
+        run: |
+          source .venv/bin/activate
+          pip install pytest
+          # Stop before processing if a flag rule or metric definition is broken
+          python -m pytest -q
+
+      - name: Configure rclone
+        run: |
+          echo "Setting up rclone configuration..."
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" | base64 -d > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+          
+      - name: Parse subject and session
+        id: parse
+        run: |
+          # Parse subject-session string (format: "sub-s1/ses-1")
+          IFS='/' read -r subject session <<< "${{ matrix.subject-session }}"
+          echo "subject=$subject" >> $GITHUB_OUTPUT
+          echo "session=$session" >> $GITHUB_OUTPUT
+          echo "Processing: $subject/$session"
+          
+      - name: Create directory structure
+        run: |
+          echo "Creating required directories..."
+          mkdir -p output/raw
+          mkdir -p preprocessed_data
+          mkdir -p results
+          
+      - name: Sync data from Dropbox
+        timeout-minutes: 15
+        run: |
+          source .venv/bin/activate
+          echo "Syncing data for ${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}"
+          
+          # Sync the specific session
+          SOURCE_PATH="${{ vars.RCLONE_REMOTE }}/output/raw/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}/"
+          DEST_PATH="output/raw/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}/"
+          
+          # Clean up any potential whitespace issues
+          SOURCE_PATH=$(echo "$SOURCE_PATH" | tr -d ' ')
+          DEST_PATH=$(echo "$DEST_PATH" | tr -d ' ')
+          
+          echo "Source: '$SOURCE_PATH'"
+          echo "Dest: '$DEST_PATH'"
+          
+          rclone sync "$SOURCE_PATH" "$DEST_PATH" --progress
+          
+      - name: Clear Python cache
+        run: |
+          echo "Clearing Python cache to ensure latest code is used..."
+          find rdocfmriqc -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          find rdocfmriqc -name "*.pyc" -delete 2>/dev/null || true
+          echo "Cache cleared"
+          
+      - name: Process data
+        timeout-minutes: 30
+        run: |
+          source .venv/bin/activate
+          echo "Processing ${{ steps.parse.outputs.subject }} session ${{ steps.parse.outputs.session }}"
+          
+          # Set PYTHONPATH to include current directory for rdocfmriqc imports
+          export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+          
+          python -m rdocfmriqc.analyze.preprocess ${{ steps.parse.outputs.subject }} --session ${{ steps.parse.outputs.session }}
+          python -m rdocfmriqc.analyze.calculate_metrics ${{ steps.parse.outputs.subject }} --session ${{ steps.parse.outputs.session }}
+          python -m rdocfmriqc.analyze.generate_flags ${{ steps.parse.outputs.subject }} --session ${{ steps.parse.outputs.session }}
+          
+      - name: Verify results
+        run: |
+          echo "Verifying results for ${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}..."
+          
+          # Results are already in BIDS format from Python scripts
+          echo "Contents of results/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}:"
+          ls -la results/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}/ || echo "Directory does not exist"
+          
+          if [ -d "results/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}/metrics" ]; then
+            echo "Metrics files:"
+            ls -la results/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}/metrics/
+          fi
+          
+          if [ -d "results/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}/flags" ]; then
+            echo "Flags files:"
+            ls -la results/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}/flags/
+          fi
+          
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.parse.outputs.subject }}-${{ steps.parse.outputs.session }}_results
+          path: results/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}/
+          if-no-files-found: warn
+          
+      - name: Upload results for git saving
+        if: always() && (github.event.inputs.save_to_git != 'false')
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-results-${{ steps.parse.outputs.subject }}-${{ steps.parse.outputs.session }}
+          path: results/${{ steps.parse.outputs.subject }}/${{ steps.parse.outputs.session }}/
+          if-no-files-found: warn
+
+  save-results-to-git:
+    needs: [detect-new-data, process-new-data]
+    if: always() && (github.event.inputs.save_to_git != 'false') && needs.detect-new-data.outputs.has-new-data == 'true'
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Download all result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: git-results-*
+          path: downloaded-artifacts/
+          
+      - name: Organize results for commit
+        run: |
+          echo "Organizing all downloaded results..."
+          mkdir -p results
+          
+          # Move all artifacts to the results directory in their proper BIDS structure
+          for artifact_dir in downloaded-artifacts/git-results-*/; do
+            if [ -d "$artifact_dir" ]; then
+              artifact_name=$(basename "$artifact_dir")
+              echo "Processing artifact: $artifact_name"
+              
+              # Parse artifact name: git-results-<BIDS subject>-<BIDS session>
+              # Strip "git-results-", then split subject/session at the trailing "-ses-<label>" segment
+              # (bash "${rest%-ses-*}" / "${rest#"$subject"-}"), not a greedy sed on "sub-[^/]*", which
+              # incorrectly produced subjects like "sub-s14-ses".
+              if [[ "$artifact_name" != git-results-sub-* ]]; then
+                echo "Skipping unexpected artifact name: $artifact_name"
+                continue
+              fi
+              rest="${artifact_name#git-results-}"
+              if [[ "$rest" != *"-ses-"* ]]; then
+                echo "ERROR: no -ses- segment in artifact name: $artifact_name"
+                continue
+              fi
+              subject="${rest%-ses-*}"
+              session_suffix="${rest#"$subject"}"
+              session="${session_suffix#-}"
+              if [[ -z "$subject" ]] || [[ -z "$session" ]] || [[ "$session" != ses-* ]]; then
+                echo "ERROR: could not parse subject/session from $artifact_name (subject='$subject' session='$session')"
+                continue
+              fi
+              echo "Subject: $subject, Session: $session"
+              
+              dest_dir="results/$subject/$session"
+              mkdir -p "$dest_dir"
+              cp -r "$artifact_dir"/* "$dest_dir/" 2>/dev/null || true
+            fi
+          done
+          
+          echo "All results organized. Directory structure:"
+          ls -la results/ || echo "Results directory is empty"
+          
+      - name: Save results to git repository
+        timeout-minutes: 10
+        run: |
+          echo "Saving all results to git repository..."
+          
+          # Configure git
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # Show what we're about to commit
+          echo "Results directory structure:"
+          find results/ -type f || echo "No files found"
+          
+          # Add all results
+          git add results/
+          
+          # Check if there are any changes
+          if ! git diff --staged --quiet; then
+            # Count how many sessions were processed
+            session_count=$(echo '${{ needs.detect-new-data.outputs.new-sessions }}' | jq '. | length')
+            
+            # Create commit message
+            git commit -m "Update results: $session_count session(s) - Weekly Automated Workflow - Run ${{ github.run_id }} - $(date '+%Y-%m-%d %H:%M')" \
+              -m "Processed sessions: ${{ needs.detect-new-data.outputs.new-sessions }}"
+            
+            echo "Committed changes for all sessions"
+            
+            # Push changes (single push, no race condition)
+            echo "Pushing changes to repository..."
+            git push origin main || {
+              echo "Push failed, pulling and retrying once..."
+              git pull --rebase origin main
+              git push origin main
+            }
+            
+            echo "Successfully pushed all results"
+          else
+            echo "No changes to commit"
+          fi
+          
+          echo "Results saved to main branch in /results directory"
+
+  compile-results:
+    needs: [detect-new-data, process-new-data, save-results-to-git]
+    if: needs.detect-new-data.outputs.has-new-data == 'true'
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+          
+      - name: Compile results summary
+        id: compile
+        run: |
+          echo "Compiling results summary..."
+          
+          # Create summary directory
+          mkdir -p compiled-results
+          
+          # Process each artifact
+          for artifact_dir in downloaded-artifacts/*/; do
+            if [ -d "$artifact_dir" ]; then
+              artifact_name=$(basename "$artifact_dir")
+              echo "Processing artifact: $artifact_name"
+              
+              # Copy to compiled results
+              cp -r "$artifact_dir" compiled-results/
+            fi
+          done
+          
+          # Create summary report
+          echo "Weekly fMRI Behavioral QC Processing Report" > compiled-results/summary_report.txt
+          echo "==========================================" >> compiled-results/summary_report.txt
+          echo "" >> compiled-results/summary_report.txt
+          echo "Date: $(date)" >> compiled-results/summary_report.txt
+          echo "Workflow Run: ${{ github.run_id }}" >> compiled-results/summary_report.txt
+          echo "" >> compiled-results/summary_report.txt
+          echo "Subjects Processed:" >> compiled-results/summary_report.txt
+          find compiled-results -name "*_results" -type d | sed 's|.*/||' | sort >> compiled-results/summary_report.txt
+          echo "" >> compiled-results/summary_report.txt
+          echo "Total Artifacts: $(find compiled-results -name "*_results" -type d | wc -l)" >> compiled-results/summary_report.txt
+          echo "" >> compiled-results/summary_report.txt
+          echo "Processing completed successfully." >> compiled-results/summary_report.txt
+          
+          # Count flags (quality issues)
+          flag_count=$(find compiled-results -path "*/flags/*" -type f | wc -l)
+          echo "Quality flags found: $flag_count" >> compiled-results/summary_report.txt
+          
+          echo "flag_count=$flag_count" >> $GITHUB_OUTPUT
+          
+      - name: Upload compiled results
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-compiled-results
+          path: compiled-results/
+          retention-days: 30
+
+  send-email-notification:
+    needs: [detect-new-data, compile-results]
+    if: always() && needs.detect-new-data.outputs.has-new-data == 'true'
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    steps:
+      - uses: actions/checkout@v5
+      
+      - name: Download compiled results
+        uses: actions/download-artifact@v4
+        with:
+          name: weekly-compiled-results
+          path: compiled-results
+          
+      - name: Generate email body
+        run: bash generate_email_body.sh
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          SUBJECTS_PROCESSED: ${{ needs.detect-new-data.outputs.new-subjects }}
+          SESSIONS_PROCESSED: ${{ needs.detect-new-data.outputs.new-sessions }}
+
+      - name: Set email body env
+        run: |
+          echo "EMAIL_BODY<<EOF" >> $GITHUB_ENV
+          cat email_body.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Send email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_PASSWORD }}
+          subject: "Weekly fMRI Behavioral QC Processing Report - ${{ github.run_id }}"
+          to: ${{ secrets.EMAIL_RECIPIENTS }}
+          from: "fMRI QC Pipeline <${{ secrets.GMAIL_USERNAME }}>"
+          body: ${{ env.EMAIL_BODY }}

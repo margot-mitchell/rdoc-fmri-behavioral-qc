@@ -1,0 +1,7 @@
+# Known-good values, one regex per line. Everything else the scanner reports is
+# treated as a real finding.
+#
+# The maintainer's institutional email. It appears in pyproject.toml and
+# CITATION.cff because those files exist to say who to cite and contact;
+# publishing it is the point. It is not participant data.
+marg0tm@stanford\.edu

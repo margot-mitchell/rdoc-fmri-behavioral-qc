@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Pre-commit guard for a repo intended to become public.
+#
+# Originally vendored from public-release-tooling/pre-commit @ unversioned on
+# 2026-09-17, then changed in two ways after the original silently stopped
+# guarding this repository:
+#
+#   1. It resolves the scanner relative to the repository root when the
+#      configured path is missing. The original relied solely on an absolute
+#      path in `git config publicscan.tool`, so renaming the checkout left it
+#      pointing at a directory that no longer existed.
+#
+#   2. It now FAILS CLOSED. The original printed "not configured; skipping
+#      scan" and exited 0, so a stale path meant commits went through
+#      unscanned -- the message said "skipping" but read like a warning about
+#      nothing. For a guard whose only job is to prevent accidental
+#      publication, a missing scanner has to block, not wave through.
+#
+# The upstream copy in public-release-tooling still has both flaws, and it
+# guards the other public mirrors.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+TOOL="$(git config publicscan.tool || true)"
+
+if [ -z "$TOOL" ] || [ ! -f "$TOOL" ]; then
+  FALLBACK="$REPO_ROOT/tools/scan_repo.py"
+  if [ -f "$FALLBACK" ]; then
+    if [ -n "$TOOL" ]; then
+      echo "pre-commit: publicscan.tool points at a missing file:" >&2
+      echo "    $TOOL" >&2
+      echo "  using $FALLBACK instead. Repoint it with:" >&2
+      echo "    git config publicscan.tool \"$FALLBACK\"" >&2
+    fi
+    TOOL="$FALLBACK"
+  else
+    echo "COMMIT BLOCKED: identifier scanner not found." >&2
+    echo "  publicscan.tool = ${TOOL:-<unset>}" >&2
+    echo "  and no scanner at $FALLBACK" >&2
+    echo >&2
+    echo "  This guard fails closed on purpose: it exists to stop participant" >&2
+    echo "  identifiers reaching a public repo, and cannot do that if it is" >&2
+    echo "  not running. Fix the path, or override deliberately with" >&2
+    echo "  git commit --no-verify if you are certain." >&2
+    exit 1
+  fi
+fi
+
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+
+# Materialise exactly what is staged -- not the working tree.
+git checkout-index -a -f --prefix="$STAGE/"
+
+if ! python3 "$TOOL" "$STAGE" --plain --quiet; then
+  echo
+  echo "COMMIT BLOCKED: staged changes contain HIGH-severity identifiers."
+  echo "Fix them, or if it is a false positive add a regex to .publicscanignore"
+  echo "and re-stage. Override only if you are certain:  git commit --no-verify"
+  exit 1
+fi

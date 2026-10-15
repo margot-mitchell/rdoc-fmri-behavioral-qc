@@ -1,0 +1,34 @@
+# NOTE: a '#' only starts a comment at the START of a line. A trailing comment
+# becomes part of the pattern and silently matches nothing, so every comment
+# here sits on its own line.
+
+# --- Participant data: this repository must never contain any ----------------
+# The pipeline resolves these three relative to the working directory. They are
+# inputs and outputs, not source, and none of them belongs in version control.
+output/
+preprocessed_data/
+results/
+temp_sync/
+compiled-results/
+
+# --- Demo scratch -------------------------------------------------------------
+demo/_sandbox/
+
+# --- Identifier scan staging (make scan) ---------------------------------------
+.scan_export/
+
+# --- Python ---------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# --- OS and editor ----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

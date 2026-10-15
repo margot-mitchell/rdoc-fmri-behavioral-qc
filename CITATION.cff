@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "rdocfmriqc: Behavioral Quality Control for the RDoC fMRI Task Battery"
+abstract: >-
+  Computes per-session behavioral metrics for the RDoC fMRI task battery and
+  flags sessions whose performance falls outside defined thresholds. Every
+  threshold lives in one module and every flag rule is covered by a test, so a
+  QC check cannot be silently switched off by a renamed metric. The package
+  carries no participant data: its test suite and demo run end to end on
+  synthetic trials built in memory.
+type: software
+authors:
+  - given-names: Margot
+    family-names: Mitchell
+    email: marg0tm@stanford.edu
+    affiliation: Stanford University
+repository-code: "https://github.com/margot-mitchell/rdoc-fmri-behavioral-qc"
+license: MIT
+version: 0.1.0
+date-released: "2026-10-15"
+keywords:
+  - quality control
+  - fMRI
+  - behavioral data
+  - RDoC
+  - cognitive tasks

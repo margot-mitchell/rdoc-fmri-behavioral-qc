@@ -1,0 +1,63 @@
+[project]
+name = "rdocfmriqc"
+version = "0.1.0"
+description = "Behavioral quality control for the RDoC fMRI task battery"
+requires-python = ">=3.10"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Margot Mitchell", email = "marg0tm@stanford.edu" }]
+# Direct dependencies only: every entry below is imported somewhere under
+# rdocfmriqc/. Transitive dependencies of pandas (six, pytz, tzdata,
+# python-dateutil, typing-extensions) were previously listed here from a
+# `pip freeze` dump and have been removed -- pip resolves them anyway, and
+# pinning them here makes this file claim requirements the code does not have.
+dependencies = [
+    "numpy>=2.2.6",
+    "pandas>=2.2.3",
+    "polars>=1.30.0",
+    # rdocfmriqc/__init__.py imports SubmissionData from preprocess.data_models.
+    # Note: data_models.py still uses pydantic-v1 `class Config:` syntax, which
+    # v2 accepts with a DeprecationWarning (see filterwarnings below).
+    "pydantic>=1.10.22",
+    # Not imported directly, and no to_pandas()/from_pandas() bridges exist, so
+    # polars' native parquet engine should cover the 4 parquet call sites on its
+    # own. Kept as a backstop because the weekly workflow runs unattended and a
+    # parquet failure there is silent until someone checks. Safe to drop once a
+    # CI run has passed without it.
+    "pyarrow>=15.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/margot-mitchell/rdoc-fmri-behavioral-qc"
+Issues = "https://github.com/margot-mitchell/rdoc-fmri-behavioral-qc/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# "tests" lets test modules import the conftest helpers (emitted_metrics) directly.
+# "." keeps `from rdocfmriqc import ...` resolving for a plain `pytest` in a
+# fresh clone, before anyone has run `pip install -e .`. It is belt-and-braces,
+# not a workaround: the import no longer depends on it.
+pythonpath = [".", "tests"]
+filterwarnings = [
+    # One known deprecation left: pydantic v1 `class Config:` in
+    # preprocess/data_models.py, which v2 accepts but warns on (migrate to
+    # ConfigDict). The polars melt() deprecation that used to live here is gone:
+    # analyze/tasks/utils.py now calls unpivot(), because polars 2.0 removed
+    # melt() outright rather than merely deprecating it.
+    "default::DeprecationWarning",
+]
+
+[tool.hatch.build.targets.wheel]
+# Package the package, not the repo root. `packages = ["."]` previously told
+# hatchling the root WAS the package, so a built wheel would have bundled
+# results/ (thousands of per-subject CSVs), tests/ and .github/ as well.
+packages = ["rdocfmriqc"]

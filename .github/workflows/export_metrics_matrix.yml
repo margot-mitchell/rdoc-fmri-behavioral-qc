@@ -1,0 +1,46 @@
+name: Export Metrics Matrix
+
+# Read-only: this job only reads results/ from the checkout and uploads an
+# artifact. It had no permissions: block, so it inherited the repo default.
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      subjects:
+        description: 'Comma-separated list of subjects (e.g., sub-s11,sub-s12)'
+        required: true
+        type: string
+
+jobs:
+  build-matrix:
+    runs-on: ubuntu-latest
+    # Inert outside the private repo. Every data job needs Dropbox credentials
+    # that only exist there, so without this a fork burns three minutes before
+    # failing at the rclone step. This makes it an immediate no-op instead.
+    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+
+      - name: Generate metrics matrices
+        run: |
+          python tools/export_metrics_matrix.py "${{ inputs.subjects }}"
+
+      - name: Upload matrix CSVs
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-matrix
+          path: results/matrix/
+          if-no-files-found: warn
