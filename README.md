@@ -1,27 +1,10 @@
 # rdocfmriqc
 
-Behavioral quality control for the RDoC fMRI task battery: per-session metrics for
-twelve cognitive tasks, and flags for sessions whose performance falls outside defined
-thresholds.
+Behavioral quality control pipeline for ongoing dense-fMRI aquisition in which we collect >12 hours of task-fMRI as well as resting-state, diffusion, and T1w and T2w anatomical scans from each participant. This package calculates per-session metrics for the 13 cognitive tasks we run and flags performance that may require intervention before the next session (i.e. not understanding instructions or not attempting to follow them, or otherwise subverting the tasks in problematic ways).
 
-**Status: 0.1.0, in active use.** This runs weekly against an ongoing study. It is
-published so the QC decisions behind that study's exclusions can be read and checked,
-not as a general-purpose tool.
+The quality of the imaging data is processed and evaluated in a seperate pipeline. This package handles behavioral data only. 
 
-## Why
-
-A QC pipeline fails in a particular way: not by crashing, but by quietly not checking
-something. A metric gets renamed and its threshold rule stops matching; a task is added
-and no rule covers it; an omission is counted one way in one place and another way
-elsewhere. Nothing errors, every session passes, and the flags that should have fired
-never do.
-
-That happened here. Several thresholds had never fired at all, because the metric names
-they referenced no longer matched what the pipeline emitted — stop signal's two-sided
-range, all four spatial cueing conditions, all four visual search accuracies, go/no-go
-accuracy, and the span omission rates. The pipeline ran green throughout.
-
-So the design follows from that:
+Given we are relying on this to ensure the quality of our data and inform decisions in real-time, it's designed to ensure no silent failures:
 
 1. **One threshold module.** Every threshold is in [`rdocfmriqc/thresholds.py`](rdocfmriqc/thresholds.py).
 2. **Every emitted metric must be covered.** The test suite enumerates what the pipeline
@@ -59,20 +42,6 @@ flanker,congruent_omission_rate,0.1,0.05
 flanker,incongruent_omission_rate,0.2,0.05
 flanker,proportion_feedback_flanker,0.5,0.2
 ```
-
-A demo where nothing failed would not show what the QC does.
-
-## Scope
-
-**In scope**: computing per-session behavioral metrics for this battery, and flagging
-sessions against stated thresholds, with each flag rule covered by a test.
-
-**Not in scope**: participant data; the statistical models, figures and tables for any
-particular paper; general-purpose QC for other batteries. The thresholds here are
-specific to this study's tasks and are not offered as community norms.
-
-**Not implemented**: trial-level exclusion (this operates at session level), and
-cross-session drift detection.
 
 ## How it runs
 
