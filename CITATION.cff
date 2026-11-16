@@ -16,8 +16,8 @@ authors:
     affiliation: Stanford University
 repository-code: "https://github.com/margot-mitchell/rdoc-fmri-behavioral-qc"
 license: MIT
-version: 0.1.0
-date-released: "2026-10-15"
+version: 0.2.0
+date-released: "2026-11-16"
 keywords:
   - quality control
   - fMRI

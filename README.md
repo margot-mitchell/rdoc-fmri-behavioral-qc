@@ -16,11 +16,12 @@ Given we are relying on this to ensure the quality of our data and inform decisi
 ## Install
 
 ```bash
-pip install git+https://github.com/margot-mitchell/rdoc-fmri-behavioral-qc@v0.1.0
+pip install git+https://github.com/margot-mitchell/rdoc-fmri-behavioral-qc@v0.2.0
 ```
 
 Pin the tag. `@main` makes "which version produced this flag?" unanswerable, which is
-the question this package exists to answer.
+the question this package exists to answer. What changed between versions is in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ## Try it
 
@@ -131,6 +132,11 @@ cueing, spatial TS conditions, visual search, n-back) emit `<condition>_accuracy
   successful inhibition, so the sense is inverted.
 - **Stop signal `stop_choice_accuracy`**: likewise, proportion of stop trials with no
   response.
+- **Span 4x4 recall accuracy** (opSpan, simpleSpan): the exception to the first rule.
+  Each recall trial is scored against its own target, and a recall with no selection
+  scores 0; it also counts toward `4x4_grid_omission_rate`. Irrespective of order is the
+  share of target cells recalled; respective of order is the share recalled in the right
+  position. Practice files use their recall trials only.
 
 ## Omission rate
 
@@ -141,7 +147,8 @@ A trial is an **omission** when the participant did not respond:
 - `response == '-1'`
 
 The flanker, Stroop and AX-CPT experiments record `response = -1` when no key is
-pressed, so a null-`rt` test alone misses every omission in those three tasks. One rule
+pressed, so a test for a null `response` alone misses every omission in those three
+tasks. One rule
 serves every task (`omission_expr` in `rdocfmriqc/analyze/tasks/utils.py`), including
 the longest-omission-sequence metric.
 
@@ -160,7 +167,7 @@ pip install -e ".[dev]"
 python3 -m pytest -q        # or: make test
 ```
 
-277 tests, no participant data anywhere — every frame is built in memory from literals,
+285 tests, no participant data anywhere — every frame is built in memory from literals,
 so the suite runs from a fresh clone. Expected values are hand-computed rather than
 captured from the implementation, since a fixture recorded from the code under test only
 pins in whatever that code already does.
