@@ -128,7 +128,7 @@ jobs:
                 echo "$all_sessions"
                 echo ""
                 echo "Sessions after filtering (excluding prescan/anat/practice/pretouch):"
-                filtered_sessions=$(echo "$all_sessions" | grep -v "prescan" | grep -v "anat" | grep -v "practice" | grep -v "pretouch")
+                filtered_sessions=$(echo "$all_sessions" | grep -v "prescan" | grep -v "anat" | grep -v "practice" | grep -v "pretouch" || true)
                 echo "$filtered_sessions"
                 echo ""
                 
@@ -155,12 +155,11 @@ jobs:
 
   process-data-matrix:
     needs: get-subjects
-    if: github.event.inputs.session_names != '' && github.event.inputs.session_names != null
-    runs-on: ubuntu-latest
     # Inert outside the private repo. Every data job needs Dropbox credentials
     # that only exist there, so without this a fork burns three minutes before
     # failing at the rclone step. This makes it an immediate no-op instead.
-    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    if: ${{ github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags' && (github.event.inputs.session_names != '' && github.event.inputs.session_names != null) }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         subject: ${{ fromJson(needs.get-subjects.outputs.subjects) }}
@@ -410,13 +409,14 @@ jobs:
     # - specific_subjects (comma-separated list) — get-subjects sets sessions to [""] so
     #   process-data-matrix does not run unless session_names is filled; without this,
     #   multi-subject / process-all would skip all processing after get-subjects.
-    if: ${{ (github.event.inputs.session_names == '' || github.event.inputs.session_names == null) && (github.event.inputs.subject_folder != '' || github.event.inputs.process_all == 'true' || (github.event.inputs.specific_subjects != '' && github.event.inputs.specific_subjects != null)) }}
-    runs-on: ubuntu-latest
     # Inert outside the private repo. Every data job needs Dropbox credentials
     # that only exist there, so without this a fork burns three minutes before
     # failing at the rclone step. This makes it an immediate no-op instead.
-    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    if: ${{ github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags' && ((github.event.inputs.session_names == '' || github.event.inputs.session_names == null) && (github.event.inputs.subject_folder != '' || github.event.inputs.process_all == 'true' || (github.event.inputs.specific_subjects != '' && github.event.inputs.specific_subjects != null))) }}
+    runs-on: ubuntu-latest
     strategy:
+      # Without this, one failing subject cancels every other subject's job.
+      fail-fast: false
       matrix:
         subject: ${{ fromJson(needs.get-subjects.outputs.subjects) }}
     steps:
@@ -501,20 +501,18 @@ jobs:
           echo "$all_sessions"
           echo ""
           echo "Sessions after filtering (excluding prescan/anat/practice/pretouch):"
-          filtered_sessions=$(echo "$all_sessions" | grep -v "prescan" | grep -v "anat" | grep -v "practice" | grep -v "pretouch")
+          filtered_sessions=$(echo "$all_sessions" | grep -v "prescan" | grep -v "anat" | grep -v "practice" | grep -v "pretouch" || true)
           echo "$filtered_sessions"
           echo ""
           
-          # Validate that we found sessions
+          # A subject whose only sessions are excluded (prescan, anat, practice,
+          # pretouch) has nothing to process yet. That is normal for a new
+          # participant, so it is skipped rather than failed. A failed rclone
+          # listing has already stopped this step above (bash -e), so an empty
+          # list here really means there is nothing to process.
           if [ -z "$available_sessions" ]; then
-            echo "ERROR: No valid sessions found for ${{ matrix.subject }} after filtering"
-            echo "This could mean:"
-            echo "1. The subject only has prescan/anat/practice/pretouch sessions (which are excluded)"
-            echo "2. The subject has no sessions at all"
-            echo "3. There's an issue with the session detection logic"
-            echo ""
-            echo "Exiting workflow - no valid sessions to process"
-            exit 1
+            echo "No sessions to process for ${{ matrix.subject }} after filtering (only prescan/anat/practice/pretouch, or none); skipping"
+            exit 0
           fi
           
           # Process each session sequentially
@@ -555,10 +553,14 @@ jobs:
         run: |
           echo "Creating artifact with proper directory structure..."
           mkdir -p artifact-upload
-          cp -r results/${{ matrix.subject }} artifact-upload/
+          if [ -d "results/${{ matrix.subject }}" ]; then
+            cp -r results/${{ matrix.subject }} artifact-upload/
+          else
+            echo "No results/${{ matrix.subject }} folder (nothing was processed); nothing to upload"
+          fi
           echo "Artifact structure:"
           ls -la artifact-upload/
-          
+
       - name: Upload results artifact for git saving
         if: always() && (github.event.inputs.save_to_git != 'false')
         uses: actions/upload-artifact@v4
@@ -568,12 +570,11 @@ jobs:
 
   save-results-to-git-matrix:
     needs: [get-subjects, process-data-matrix]
-    if: always() && (github.event.inputs.save_to_git != 'false') && github.event.inputs.session_names != '' && github.event.inputs.session_names != null
-    runs-on: ubuntu-latest
     # Inert outside the private repo. Every data job needs Dropbox credentials
     # that only exist there, so without this a fork burns three minutes before
     # failing at the rclone step. This makes it an immediate no-op instead.
-    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    if: ${{ github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags' && (always() && (github.event.inputs.save_to_git != 'false') && github.event.inputs.session_names != '' && github.event.inputs.session_names != null) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       
@@ -614,9 +615,22 @@ jobs:
               fi
               echo "Subject: $subject, Session: $session"
               
-              # Create the BIDS structure and copy files
-              mkdir -p "results/$subject/$session"
-              cp -r "$artifact_dir"/* "results/$subject/$session/" 2>/dev/null || true
+              # Replace the session folder with the artifact rather than copying
+              # over the checked-out one. generate_flags deletes a flags file
+              # when a re-run passes, and a copy would keep the stale file in
+              # the commit. The artifact is the processing job's whole session
+              # folder, so nothing else is lost. Copy first and swap after, so
+              # a failed copy leaves the checked-out folder in place.
+              dest_dir="results/$subject/$session"
+              mkdir -p "results/$subject"
+              rm -rf "$dest_dir.new"
+              if cp -R "$artifact_dir" "$dest_dir.new"; then
+                rm -rf "$dest_dir"
+                mv "$dest_dir.new" "$dest_dir"
+              else
+                echo "ERROR: could not copy $artifact_name; keeping the checked-out $dest_dir"
+                rm -rf "$dest_dir.new"
+              fi
             fi
           done
           
@@ -663,12 +677,11 @@ jobs:
 
   save-results-to-git-sequential:
     needs: [get-subjects, process-data-sequential]
-    if: ${{ always() && (github.event.inputs.save_to_git != 'false') && (github.event.inputs.session_names == '' || github.event.inputs.session_names == null) && (github.event.inputs.subject_folder != '' || github.event.inputs.process_all == 'true' || (github.event.inputs.specific_subjects != '' && github.event.inputs.specific_subjects != null)) }}
-    runs-on: ubuntu-latest
     # Inert outside the private repo. Every data job needs Dropbox credentials
     # that only exist there, so without this a fork burns three minutes before
     # failing at the rclone step. This makes it an immediate no-op instead.
-    if: github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags'
+    if: ${{ github.repository == 'margot-mitchell/fMRI_RDoC_beh_flags' && (always() && (github.event.inputs.save_to_git != 'false') && (github.event.inputs.session_names == '' || github.event.inputs.session_names == null) && (github.event.inputs.subject_folder != '' || github.event.inputs.process_all == 'true' || (github.event.inputs.specific_subjects != '' && github.event.inputs.specific_subjects != null))) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       
@@ -689,8 +702,25 @@ jobs:
               artifact_name=$(basename "$artifact_dir")
               echo "Processing artifact: $artifact_name"
               
-              # The artifact already contains the sub-X structure, so just copy it
-              cp -r "$artifact_dir"/* results/ 2>/dev/null || true
+              # The artifact holds the processing job's whole results/<subject>
+              # folder. Replace each subject's folder with it rather than
+              # copying over the checked-out one: generate_flags deletes a
+              # flags file when a re-run passes, and a copy would keep the
+              # stale file in the commit. Copy first and swap after, so a
+              # failed copy leaves the checked-out folder in place.
+              for subject_dir in "$artifact_dir"*/; do
+                [ -d "$subject_dir" ] || continue
+                subject=$(basename "$subject_dir")
+                dest_dir="results/$subject"
+                rm -rf "$dest_dir.new"
+                if cp -R "$subject_dir" "$dest_dir.new"; then
+                  rm -rf "$dest_dir"
+                  mv "$dest_dir.new" "$dest_dir"
+                else
+                  echo "ERROR: could not copy $subject from $artifact_name; keeping the checked-out $dest_dir"
+                  rm -rf "$dest_dir.new"
+                fi
+              done
             fi
           done
           
