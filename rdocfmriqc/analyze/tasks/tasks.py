@@ -12,6 +12,11 @@ from .utils import get_metrics, omission_expr, organize_metrics
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
+# Recall-grid trials in the span tasks. A test file's recall trials are
+# 'test_trial'; a practice file holds 'practice_trial' recall trials (and may
+# hold 'test_trial' ones) alongside instruction and stimulus rows.
+SPAN_RECALL_TRIAL_IDS = ('practice_trial', 'test_trial')
+
 def get_span_metrics(test_trials: pl.DataFrame):
     """Calculate span task metrics.
 
@@ -104,28 +109,34 @@ def get_span_metrics(test_trials: pl.DataFrame):
             logging.debug(f"Respective accuracy: {response} vs {correct} = {accuracy}")
             return accuracy
 
-        response_series = test_trials.select(pl.col('valid_responses')).to_series()
-        responses = [safe_eval(item) for item in response_series if item is not None]
-        
         # Check if spatial_sequence exists, otherwise use correct_cell_order
         if 'spatial_sequence' in test_trials.columns:
-            correct_series = test_trials.select(pl.col('spatial_sequence')).to_series()
+            target_col = 'spatial_sequence'
         elif 'correct_cell_order' in test_trials.columns:
-            correct_series = test_trials.select(pl.col('correct_cell_order')).to_series()
+            target_col = 'correct_cell_order'
         else:
             return {
                 'accuracy_irrespective_of_order': [0.0],
                 'accuracy_respective_of_order': [0.0],
             }
-            
-        correct_responses = [safe_eval(item) for item in correct_series if item is not None]
 
         accuracy_irrespective_of_order = []
         accuracy_with_respect_to_order = []
 
-        for response, correct in zip(responses, correct_responses):
-            if not response or not correct:
+        # Score each recall trial's response against that same trial's target.
+        # The response and target lists used to be built separately, dropping
+        # null responses but not their targets, and then paired by position,
+        # so one null shifted every later response onto the previous trial's
+        # target. A missed recall ("[]", null or unparseable) now scores 0
+        # against its own target instead of being skipped; it also counts
+        # toward 4x4_grid_omission_rate. A row with no target is not a recall
+        # trial that can be scored, so it is left out.
+        rows = test_trials.select(pl.col('valid_responses'), pl.col(target_col)).iter_rows()
+        for response_value, target_value in rows:
+            correct = safe_eval(target_value)
+            if not correct:
                 continue
+            response = safe_eval(response_value)
             irr_acc = get_irrespective_of_order_accuracy(response, correct)
             resp_acc = get_with_respect_to_order_accuracy(response, correct)
             accuracy_irrespective_of_order.append(irr_acc)
@@ -784,7 +795,9 @@ def operation_span_rdoc(df: pl.DataFrame, filename: str = None) -> pl.DataFrame:
         if 'practice' in fname or 'pretouch' in fname:
             is_pretouch = True
     if is_pretouch:
-        test_trials = df
+        # Span metrics come from recall trials only; the rest of a practice
+        # file (instructions, stimuli) would otherwise read as missed recalls.
+        test_trials = df.filter(pl.col('trial_id').is_in(SPAN_RECALL_TRIAL_IDS))
         processing_trials = df
     else:
         test_trials = df.filter(pl.col('trial_id') == 'test_trial')
@@ -1030,7 +1043,9 @@ def simple_span_rdoc(df: pl.DataFrame, filename: str = None) -> pl.DataFrame:
         if 'practice' in fname or 'pretouch' in fname:
             is_pretouch = True
     if is_pretouch:
-        test_trials = df
+        # Span metrics come from recall trials only; the rest of a practice
+        # file (instructions, stimuli) would otherwise read as missed recalls.
+        test_trials = df.filter(pl.col('trial_id').is_in(SPAN_RECALL_TRIAL_IDS))
     else:
         test_trials = df.filter(pl.col('trial_id') == 'test_trial')
 
