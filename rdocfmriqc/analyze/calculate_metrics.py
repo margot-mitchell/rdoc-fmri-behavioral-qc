@@ -91,8 +91,8 @@ def main():
     else:
         # All subjects mode
         preprocessed_dir = 'preprocessed_data'
-        subject_folders = [f for f in os.listdir(preprocessed_dir)
-                           if os.path.isdir(os.path.join(preprocessed_dir, f)) and f.startswith('sub-')]
+        subject_folders = sorted(f for f in os.listdir(preprocessed_dir)
+                                 if os.path.isdir(os.path.join(preprocessed_dir, f)) and f.startswith('sub-'))
         if not subject_folders:
             print(f"No subject folders found in {preprocessed_dir}")
             sys.exit(1)
@@ -110,8 +110,8 @@ def main():
             continue
 
         # Get all task directories
-        task_dirs = [d for d in os.listdir(preprocessed_dir)
-                    if os.path.isdir(os.path.join(preprocessed_dir, d))]
+        task_dirs = sorted(d for d in os.listdir(preprocessed_dir)
+                           if os.path.isdir(os.path.join(preprocessed_dir, d)))
 
         # Process each task
         for task_dir in task_dirs:
@@ -123,9 +123,10 @@ def main():
                 logging.warning(f'Unknown task: {task_dir}')
                 continue
 
-            # Get all parquet files for this task
+            # Get all parquet files for this task, sorted so that a task with
+            # several runs writes them to its metrics file in name order
             task_path = os.path.join(preprocessed_dir, task_dir)
-            parquet_files = [f for f in os.listdir(task_path) if f.endswith('.parquet')]
+            parquet_files = sorted(f for f in os.listdir(task_path) if f.endswith('.parquet'))
 
             if not parquet_files:
                 logging.warning(f'No parquet files found in {task_path}')
@@ -205,7 +206,7 @@ def main():
                         logging.warning(f'Could not extract session from filename: {parquet_file}')
 
                 # Process each session's files
-                for session_name, session_file_list in session_files_map.items():
+                for session_name, session_file_list in sorted(session_files_map.items()):
                     print(f"    Processing {len(session_file_list)} files for session {session_name}")
                     
                     # Create output directory for this session

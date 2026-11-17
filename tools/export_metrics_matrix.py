@@ -48,7 +48,7 @@ def load_metrics_for_subject(subject: str) -> Dict[str, List[Dict[str, str]]]:
         metrics_path_pattern = os.path.join(
             subject_dir, session_dir, "metrics", "*.csv"
         )
-        for metrics_file in glob.glob(metrics_path_pattern):
+        for metrics_file in sorted(glob.glob(metrics_path_pattern)):
             basename_lower = os.path.basename(metrics_file).lower()
             if any(keyword in basename_lower for keyword in EXCLUDED_KEYWORDS):
                 continue

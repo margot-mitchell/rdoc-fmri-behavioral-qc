@@ -283,17 +283,32 @@ def check_metric(metric: str, value: Optional[float], threshold_name: str,
     return None
 
 
+def _run_files(task_metrics_df: pl.DataFrame) -> pl.Series:
+    """The 'file' column, with '' for a missing column or value."""
+    if 'file' not in task_metrics_df.columns:
+        return pl.Series('file', [''] * task_metrics_df.height, dtype=pl.String)
+    return task_metrics_df['file'].cast(pl.String).fill_null('')
+
+
 def check_thresholds_from_csv(task_metrics_df: pl.DataFrame, task_name: str) -> List[Tuple[str, float, float]]:
-    """Check if any metrics violate thresholds by reading from metrics CSV.
+    """Check one run's metrics against the thresholds.
 
     Args:
-        task_metrics_df (pl.DataFrame): DataFrame containing task metrics
+        task_metrics_df (pl.DataFrame): Metric rows for one run
         task_name (str): Name of the task
 
     Returns:
         List[Tuple[str, float, float]]: List of violations (metric, value, threshold).
             For a 'range' rule the threshold is the bound that was crossed.
+
+    Raises:
+        ValueError: if the rows come from several runs (more than one value in
+            the 'file' column). Use check_runs() for a whole metrics file.
     """
+    files = sorted(set(_run_files(task_metrics_df)))
+    if len(files) > 1:
+        raise ValueError(f"Metrics for {task_name} hold {len(files)} runs "
+                         f"({', '.join(files)}); check each with check_runs()")
     metrics = dict(zip(task_metrics_df['metric'], task_metrics_df['value']))
     if 'go_rt' in metrics and task_name in GO_RT_NAMES:
         metrics[GO_RT_NAMES[task_name]] = metrics.pop('go_rt')
@@ -335,6 +350,33 @@ def check_thresholds_from_csv(task_metrics_df: pl.DataFrame, task_name: str) -> 
 
     return violations
 
+
+def check_runs(task_metrics_df: pl.DataFrame, task_name: str) -> List[Tuple[str, str, float, float]]:
+    """Check every run in a metrics file, each on its own.
+
+    A task with several runs in a session has all of them in one metrics file,
+    one parquet file per run in the 'file' column. Each run is checked
+    separately, so its flags depend neither on another run's values nor on the
+    order of the rows.
+
+    Args:
+        task_metrics_df (pl.DataFrame): The task's metrics file
+        task_name (str): Name of the task
+
+    Returns:
+        List[Tuple[str, str, float, float]]: Violations as (file, metric, value,
+            threshold), runs in file-name order. A metrics file with no 'file'
+            column is one run, with file ''.
+    """
+    runs = task_metrics_df.with_columns(_run_files(task_metrics_df))
+    violations = []
+    for file in sorted(set(runs['file'])):
+        run = runs.filter(pl.col('file') == file)
+        violations.extend((file, *violation)
+                          for violation in check_thresholds_from_csv(run, task_name))
+    return violations
+
+
 def main():
     # Configure logging
     logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.WARNING)
@@ -351,8 +393,8 @@ def main():
     else:
         # All subjects mode - look for subject folders in results directory
         results_dir = 'results'
-        subject_folders = [f for f in os.listdir(results_dir)
-                           if os.path.isdir(os.path.join(results_dir, f)) and f.startswith('sub-')]
+        subject_folders = sorted(f for f in os.listdir(results_dir)
+                                 if os.path.isdir(os.path.join(results_dir, f)) and f.startswith('sub-'))
         if not subject_folders:
             print(f"No subject folders found in {results_dir}")
             sys.exit(1)
@@ -373,9 +415,9 @@ def main():
                 continue
 
             # Get all session directories
-            sessions_to_process = [d for d in os.listdir(subject_results_dir)
-                                   if os.path.isdir(os.path.join(subject_results_dir, d))
-                                   and d.startswith('ses-')]
+            sessions_to_process = sorted(d for d in os.listdir(subject_results_dir)
+                                         if os.path.isdir(os.path.join(subject_results_dir, d))
+                                         and d.startswith('ses-'))
 
             if not sessions_to_process:
                 logging.warning(f'No session directories found in {subject_results_dir}')
@@ -394,7 +436,7 @@ def main():
                 logging.warning(f'Metrics directory {metrics_dir} does not exist for session {session_name}')
                 continue
 
-            csv_files = [f for f in os.listdir(metrics_dir) if f.endswith('.csv')]
+            csv_files = sorted(f for f in os.listdir(metrics_dir) if f.endswith('.csv'))
 
             if not csv_files:
                 logging.warning(f'No CSV files found in {metrics_dir}')
@@ -430,17 +472,17 @@ def main():
                 task_metrics_df = pl.read_csv(metrics_path)
                 logging.debug(f"Found {len(task_metrics_df)} metrics in {metrics_file}")
 
-                # Check thresholds
-                violations = check_thresholds_from_csv(task_metrics_df, task_name)
+                # Check thresholds, each run on its own
+                violations = check_runs(task_metrics_df, task_name)
                 flags_path = os.path.join(output_dir, f'{file_task_name}_flags.csv')
                 if violations:
                     flags_list = []
-                    for metric, value, threshold in violations:
-                        flags_list.append((task_name, metric, value, threshold))
-                        logging.warning(f"Flag generated: {task_name} - {metric} = {value} (threshold: {threshold})")
+                    for file, metric, value, threshold in violations:
+                        flags_list.append((task_name, metric, value, threshold, file))
+                        logging.warning(f"Flag generated: {task_name} {file} - {metric} = {value} (threshold: {threshold})")
 
-                    # Save flags for this task
-                    flags_df = pl.DataFrame(flags_list, schema=['task', 'metric', 'value', 'threshold'], orient="row")
+                    # Save flags for this task; 'file' names the run each flag is for
+                    flags_df = pl.DataFrame(flags_list, schema=['task', 'metric', 'value', 'threshold', 'file'], orient="row")
                     flags_df.write_csv(flags_path)
                     logging.warning(f"Saved {len(flags_list)} flags to {flags_path}")
                 else:

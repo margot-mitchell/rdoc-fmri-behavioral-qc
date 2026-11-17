@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 (2026-11-16)
+
+### Runs
+
+- Each run in a metrics file is checked on its own, and every flag row names its run in
+  a new last column, `file`. A session with go/no-go `run-1` and `run-2` gets a set of
+  flags for each.
+- When two raw files would be saved as the same run, both are kept, each named by its
+  dateTime (`..._run-1_dateTime-<n>.parquet`), and preprocessing logs both names. If the
+  dateTime does not tell them apart, preprocessing stops and writes nothing.
+- Every stage, and `tools/export_metrics_matrix.py`, reads files in sorted order, so a
+  re-run gives the same output however the filesystem lists them.
+
+### Documentation
+
+- Install from `v0.3.0`.
+- The README describes the `file` column, sessions with several runs, and the dateTime
+  names. The test count is 299.
+
 ## 0.2.0 (2026-11-16)
 
 ### Span recall accuracy

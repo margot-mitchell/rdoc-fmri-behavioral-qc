@@ -18,8 +18,11 @@ results/<subject>/<session>/metrics/      <task>_metrics.csv   metric,value,task
         │
         │  python -m rdocfmriqc.analyze.generate_flags <subject> --session <session>
         ▼
-results/<subject>/<session>/flags/        <task>_flags.csv     task,metric,value,threshold
+results/<subject>/<session>/flags/        <task>_flags.csv     task,metric,value,threshold,file
 ```
+
+Every stage reads its files in sorted order, so a re-run on the same data gives the same
+output however the filesystem lists them.
 
 All three resolve those directories **relative to the process working directory**, which
 is why the test suite and `make demo` can run the whole pipeline inside a throwaway

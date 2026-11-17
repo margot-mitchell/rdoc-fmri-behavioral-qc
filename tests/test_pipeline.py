@@ -120,7 +120,9 @@ def test_metrics_stage_records_provenance(pipeline_sandbox):
 def test_flags_file_has_the_documented_columns(processed):
     df = pl.read_csv(processed / 'results' / 'sub-test' / 'ses-1'
                      / 'flags' / 'flanker_flags.csv')
-    assert df.columns == ['task', 'metric', 'value', 'threshold']
+    assert df.columns == ['task', 'metric', 'value', 'threshold', 'file']
+    # one run, so every flag names the same parquet file
+    assert df['file'].unique().to_list() == ['sub-test_ses-1_task-flanker_rdoc_run-1.parquet']
 
 
 def test_exactly_the_engineered_violations_are_flagged(processed):

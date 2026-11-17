@@ -8,6 +8,10 @@ This script expects input files in:
     output/raw/<subject_folder>/**/*.json
 and outputs to:
     preprocessed_data/<subject_folder>/<task_name>/<parquet files>
+
+Raw files are processed in sorted order. If two raw files would be saved under
+the same parquet name, both are kept, each named by its dateTime, and the clash
+is logged as an error (see plan_outputs).
 """
 
 import json
@@ -16,7 +20,7 @@ import os
 import sys
 import subprocess
 import argparse
-from typing import List, Dict, Set
+from typing import List, Dict, Optional, Set, Tuple
 from pathlib import Path
 
 import polars as pl
@@ -240,12 +244,16 @@ def get_trialdata_df(data: Dict) -> pl.DataFrame:
         return pl.from_dicts(normalized_data, infer_schema_length=None)
 
 
-def process_file(filepath: str, output_dir: str) -> None:
-    """Process a single JSON file and save it as parquet.
-    
+def output_location(filepath: str, output_dir: str) -> Optional[Tuple[str, str]]:
+    """Work out where a raw JSON file is saved, from its name alone.
+
     Args:
         filepath (str): Path to the input JSON file
-        output_dir (str): Directory to save the output parquet file
+        output_dir (str): The subject's preprocessed_data folder
+
+    Returns:
+        Optional[Tuple[str, str]]: (task subfolder, parquet file name), or None
+            (logged) if the task cannot be read from the file name
     """
     filename = os.path.basename(filepath)
     parts = filename.split('_')
@@ -267,7 +275,7 @@ def process_file(filepath: str, output_dir: str) -> None:
         task_name = '_'.join(task_parts)
     else:
         logging.error(f'Could not extract task name from {filepath}')
-        return
+        return None
 
     # Task name mapping
     task_mapping = {
@@ -375,11 +383,7 @@ def process_file(filepath: str, output_dir: str) -> None:
 
     if subfolder_name is None:
         logging.error(f'Could not determine subfolder name for {filepath}')
-        return
-
-    # Create output directory structure
-    task_dir = os.path.join(output_dir, subfolder_name)
-    os.makedirs(task_dir, exist_ok=True)
+        return None
 
     # Create output filename
     run_num = None
@@ -399,8 +403,30 @@ def process_file(filepath: str, output_dir: str) -> None:
         outname = f'{os.path.basename(output_dir)}_task-{task_name}_run-{run_num}.parquet'
     else:
         outname = f'{os.path.basename(output_dir)}_task-{task_name}.parquet'
-        
-    outpath = os.path.join(task_dir, outname)
+
+    return subfolder_name, outname
+
+
+def process_file(filepath: str, output_dir: str, outname: Optional[str] = None) -> None:
+    """Process a single JSON file and save it as parquet.
+
+    Args:
+        filepath (str): Path to the input JSON file
+        output_dir (str): Directory to save the output parquet file
+        outname (Optional[str]): Parquet file name to save under. Defaults to
+            the name from output_location(); plan_outputs() gives another name
+            when several raw files map to one run.
+    """
+    location = output_location(filepath, output_dir)
+    if location is None:
+        return
+    subfolder_name, default_name = location
+    filename = os.path.basename(filepath)
+
+    # Create output directory structure
+    task_dir = os.path.join(output_dir, subfolder_name)
+    os.makedirs(task_dir, exist_ok=True)
+    outpath = os.path.join(task_dir, outname or default_name)
 
     # Skip if file already exists
     if os.path.isfile(outpath):
@@ -440,6 +466,85 @@ def process_file(filepath: str, output_dir: str) -> None:
         logging.error(f'Error processing {filepath}: {str(e)}')
 
 
+class DuplicateRunError(ValueError):
+    """Several raw files map to one run, and their dateTime does not tell them apart."""
+
+
+def datetime_tag(filepath: str) -> Optional[str]:
+    """The 'dateTime-<n>' part of a raw file name, or None if it has none."""
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    for part in stem.split('_'):
+        if part.startswith('dateTime-'):
+            return part
+    return None
+
+
+def plan_outputs(filepaths: List[str], output_dir: str) -> List[Tuple[str, str]]:
+    """Pair each raw file with the parquet name it is saved under.
+
+    Files are taken in sorted order, so the plan does not depend on the order
+    they were listed in. A run normally has one raw file. When several map to
+    the same parquet name, each is kept, under that name plus its dateTime
+    (..._run-1_dateTime-<n>.parquet), and the clash is logged as an error:
+    someone needs to check which recording is the real run. Files whose task
+    cannot be read from the name are left out (output_location logs them).
+
+    Args:
+        filepaths (List[str]): Raw JSON files, in any order
+        output_dir (str): The subject's preprocessed_data folder
+
+    Returns:
+        List[Tuple[str, str]]: (raw file, parquet file name), sorted by raw file
+
+    Raises:
+        DuplicateRunError: if clashing files have no dateTime, or share one
+    """
+    groups: Dict[Tuple[str, str], List[str]] = {}
+    for path in sorted(filepaths):
+        location = output_location(path, output_dir)
+        if location is not None:
+            groups.setdefault(location, []).append(path)
+
+    plan = []
+    for (_, outname), paths in groups.items():
+        if len(paths) == 1:
+            plan.append((paths[0], outname))
+            continue
+        names = ', '.join(os.path.basename(p) for p in paths)
+        tags = [datetime_tag(p) for p in paths]
+        if None in tags or len(set(tags)) < len(tags):
+            raise DuplicateRunError(
+                f'{len(paths)} raw files map to {outname}, and their dateTime does not '
+                f'tell them apart: {names}. Check which recording is the real run, '
+                f'and rename or remove the others.')
+        stem = outname[:-len('.parquet')]
+        renamed = [f'{stem}_{tag}.parquet' for tag in tags]
+        logging.error(f'{len(paths)} raw files map to {outname}: {names}. Keeping each, '
+                      f'as {", ".join(renamed)}. Check which recording is the real run.')
+        plan.extend(zip(paths, renamed))
+    return sorted(plan)
+
+
+def find_json_files(top: str) -> List[str]:
+    """Every .json file under a folder, in sorted order."""
+    found = []
+    for root, dirs, files in os.walk(top):
+        dirs.sort()
+        found.extend(os.path.join(root, f) for f in files if f.endswith('.json'))
+    return sorted(found)
+
+
+def preprocess_files(filepaths: List[str], output_dir: str) -> None:
+    """Save each raw file as parquet; exit with an error on an unresolvable clash."""
+    try:
+        plan = plan_outputs(filepaths, output_dir)
+    except DuplicateRunError as e:
+        logging.error(str(e))
+        sys.exit(1)
+    for path, outname in plan:
+        process_file(path, output_dir, outname)
+
+
 def main():
     # Configure logging
     logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
@@ -456,8 +561,8 @@ def main():
     else:
         # All subjects mode
         raw_dir = os.path.join('output', 'raw')
-        subject_folders = [f for f in os.listdir(raw_dir)
-                           if os.path.isdir(os.path.join(raw_dir, f)) and f.startswith('sub-')]
+        subject_folders = sorted(f for f in os.listdir(raw_dir)
+                                 if os.path.isdir(os.path.join(raw_dir, f)) and f.startswith('sub-'))
         if not subject_folders:
             print(f"No subject folders found in {raw_dir}")
             sys.exit(1)
@@ -473,24 +578,16 @@ def main():
             session_dir = os.path.join(input_dir, args.session)
             if os.path.exists(session_dir):
                 print(f"Processing session {args.session} for subject {subject_folder}")
-                found = False
-                for root, dirs, files in os.walk(session_dir):
-                    for file in files:
-                        if file.endswith('.json'):
-                            found = True
-                            input_file = os.path.join(root, file)
-                            process_file(input_file, output_dir)
-                if not found:
+                json_files = find_json_files(session_dir)
+                if json_files:
+                    preprocess_files(json_files, output_dir)
+                else:
                     print(f"No .json files found in {session_dir} for session {args.session}.")
             else:
                 print(f"Session directory {session_dir} not found for subject {subject_folder}. Skipping.")
         else:
             # Process all files in subject folder
-            for root, dirs, files in os.walk(input_dir):
-                for file in files:
-                    if file.endswith('.json'):
-                        input_file = os.path.join(root, file)
-                        process_file(input_file, output_dir)
+            preprocess_files(find_json_files(input_dir), output_dir)
 
 
 if __name__ == '__main__':

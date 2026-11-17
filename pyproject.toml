@@ -1,6 +1,6 @@
 [project]
 name = "rdocfmriqc"
-version = "0.2.0"
+version = "0.3.0"
 description = "Behavioral quality control for the RDoC fMRI task battery"
 requires-python = ">=3.10"
 readme = "README.md"

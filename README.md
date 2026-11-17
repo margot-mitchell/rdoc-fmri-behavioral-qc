@@ -16,7 +16,7 @@ Given we are relying on this to ensure the quality of our data and inform decisi
 ## Install
 
 ```bash
-pip install git+https://github.com/margot-mitchell/rdoc-fmri-behavioral-qc@v0.2.0
+pip install git+https://github.com/margot-mitchell/rdoc-fmri-behavioral-qc@v0.3.0
 ```
 
 Pin the tag. `@main` makes "which version produced this flag?" unanswerable, which is
@@ -37,11 +37,11 @@ accuracy 0.889 and omission 0.10; incongruent 0.625 and 0.20; feedback 0.5), and
 straddle the real thresholds, so it raises exactly four flags:
 
 ```
-task,metric,value,threshold
-flanker,incongruent_choice_accuracy,0.625,0.75
-flanker,congruent_omission_rate,0.1,0.05
-flanker,incongruent_omission_rate,0.2,0.05
-flanker,proportion_feedback_flanker,0.5,0.2
+task,metric,value,threshold,file
+flanker,incongruent_choice_accuracy,0.625,0.75,sub-demo_ses-1_task-flanker_rdoc_run-1.parquet
+flanker,congruent_omission_rate,0.1,0.05,sub-demo_ses-1_task-flanker_rdoc_run-1.parquet
+flanker,incongruent_omission_rate,0.2,0.05,sub-demo_ses-1_task-flanker_rdoc_run-1.parquet
+flanker,proportion_feedback_flanker,0.5,0.2,sub-demo_ses-1_task-flanker_rdoc_run-1.parquet
 ```
 
 ## How it runs
@@ -85,12 +85,21 @@ failing the run, so check the log if a task you expected is missing from the out
 
 ## Output format
 
-**Metrics** — `metric`, `value`, `task`, `file`.
+**Metrics** — `metric`, `value`, `task`, `file` (the run's parquet file).
 **Flags** — `task`, `metric`, `value`, `threshold` (for a two-sided check, the bound
-that was crossed).
+that was crossed), `file` (the run the flag is for).
+
+A task with several runs in a session, such as go/no-go `run-1` and `run-2`, has all of
+them in one metrics file, in file-name order, and each run is checked on its own.
+
+Two raw files that would be saved as the same run (for example two `run-1` recordings of
+one task in a session) are both kept, each named by its dateTime:
+`..._run-1_dateTime-<n>.parquet`. Preprocessing logs both names so someone can check
+which recording is the real run, and stops if the dateTime does not tell them apart.
 
 A flags file is written only when a check fails, and re-running a session that now
-passes removes its old flags file.
+passes removes its old flags file. Flags files from before 0.3.0 have only the first
+four columns.
 
 ## Flag rules
 
@@ -166,7 +175,7 @@ pip install -e ".[dev]"
 python3 -m pytest -q        # or: make test
 ```
 
-285 tests, no participant data anywhere — every frame is built in memory from literals,
+299 tests, no participant data anywhere — every frame is built in memory from literals,
 so the suite runs from a fresh clone. Expected values are hand-computed rather than
 captured from the implementation, since a fixture recorded from the code under test only
 pins in whatever that code already does.
