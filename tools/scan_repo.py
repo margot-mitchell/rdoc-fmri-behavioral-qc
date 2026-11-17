@@ -54,7 +54,7 @@ PATTERNS = [
     # re-linked against platform-side submission records.
     (MED, "epoch_ms_timestamp", re.compile(r"(?<!\d)1[6-8]\d{11}(?!\d)")),
     (MED, "absolute_home_path", re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+")),
-    # Initials-as-subject-ID, e.g. sub-SK
+    # Initials as a subject ID: "sub-" then two or three capital letters
     (MED, "initials_subject_id", re.compile(r"\bsub-[A-Z]{2,3}(?![a-z0-9])")),
     (MED, "dob_like_date", re.compile(
         r"(?<!\d)(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])[/-]"
