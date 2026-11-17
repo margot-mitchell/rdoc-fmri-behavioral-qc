@@ -8,8 +8,6 @@
 output/
 preprocessed_data/
 results/
-temp_sync/
-compiled-results/
 
 # --- Demo scratch -------------------------------------------------------------
 demo/_sandbox/

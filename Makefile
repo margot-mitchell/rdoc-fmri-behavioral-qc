@@ -25,7 +25,7 @@ hooks: ## Install the pre-commit identifier guard
 	git config publicscan.tool "$(CURDIR)/tools/scan_repo.py"
 	@echo "pre-commit guard installed"
 
-demo: ## Run the whole pipeline on synthetic data and print the QC email
+demo: ## Run the whole pipeline on synthetic data and print the metrics and flags
 	python3 demo/run_demo.py
 
 wheel: ## Build a wheel and list what it contains

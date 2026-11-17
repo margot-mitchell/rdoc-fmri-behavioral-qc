@@ -10,8 +10,7 @@ Development utilities. Nothing here is installed with the package.
 
 ## The identifier scanner
 
-`scan_repo.py` is vendored rather than referenced, because CI cannot reach a local
-path. Its header records where it came from and when.
+`scan_repo.py` is kept in this repository so that CI can run it.
 
 It classifies findings by severity. **HIGH** blocks a release: email addresses, phone
 numbers, NDA GUIDs, UUIDs, Prolific-format IDs, private keys, hardcoded secret

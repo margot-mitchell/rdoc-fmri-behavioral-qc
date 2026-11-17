@@ -10,8 +10,8 @@ Given we are relying on this to ensure the quality of our data and inform decisi
 2. **Every emitted metric must be covered.** The test suite enumerates what the pipeline
    actually emits (`tests/emitted_metrics.py`) and fails if a metric has no rule and is
    not on the explicit never-flagged list.
-3. **Tests gate processing.** The production workflow runs `pytest` before it will
-   process anything.
+3. **Tests come first.** The suite runs in CI on every push; run it before processing
+   data.
 
 ## Install
 
@@ -26,7 +26,7 @@ the question this package exists to answer. What changed between versions is in
 ## Try it
 
 No data required — the demo generates a synthetic flanker run, pushes it through all
-three stages, and prints the QC email:
+three stages, and prints the metrics and flags:
 
 ```bash
 make demo
@@ -56,9 +56,8 @@ output/raw/<subject>/<session>/*.json
   → generate_flags    → results/<subject>/<session>/flags/<task>_flags.csv
 ```
 
-[`docs/architecture.md`](docs/architecture.md) describes the weekly automation, the
-email report, and why the data workflows in `.github/workflows/` are inert in this
-repository.
+[`docs/architecture.md`](docs/architecture.md) shows how to run each stage on your own
+data, and how to combine sessions into one matrix per task.
 
 ## Supported tasks
 

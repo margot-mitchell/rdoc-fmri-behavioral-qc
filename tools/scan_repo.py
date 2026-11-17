@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-# Vendored from rdocmetrics/tools/scan_repo.py on 2026-10-15.
-#
-# Vendored rather than referenced: this repository is public and its CI cannot
-# reach a local path. Taken from rdocmetrics rather than from
-# public-release-tooling, because that upstream copy still lets --plain win
-# silently over --history, so `--history --plain` scans the working tree and
-# reports a clean history it never read. Re-vendor from rdocmetrics if the
-# scanner changes.
 """
 Identifier / secret scanner for pre-public-release review.
 

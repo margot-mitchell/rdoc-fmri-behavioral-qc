@@ -24,14 +24,6 @@ Four recall trials, with no selection on trial 2:
 Irrespective of order: 0.6875. Respective of order: 0.5625. `tests/test_span_metrics.py`
 covers these cases.
 
-### Workflows
-
-- Each data job uses a single run condition that combines the repository guard with the
-  job's own condition.
-- Saving replaces each session's results folder with the newly processed copy.
-- All-sessions runs continue across subjects (`fail-fast: false`) and skip subjects with
-  no sessions to process.
-
 ### Documentation
 
 - Install from `v0.2.0`.

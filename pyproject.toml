@@ -21,9 +21,7 @@ dependencies = [
     "pydantic>=1.10.22",
     # Not imported directly, and no to_pandas()/from_pandas() bridges exist, so
     # polars' native parquet engine should cover the 4 parquet call sites on its
-    # own. Kept as a backstop because the weekly workflow runs unattended and a
-    # parquet failure there is silent until someone checks. Safe to drop once a
-    # CI run has passed without it.
+    # own. Kept as a backstop for reading parquet files.
     "pyarrow>=15.0.0",
 ]
 

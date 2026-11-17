@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the full QC pipeline on synthetic data and print the resulting report.
+"""Run the full QC pipeline on synthetic data and print its metrics and flags.
 
 No participant data is involved. The synthetic flanker run comes from the same
 generator the test suite uses (tests/conftest.py::build_flanker_raw_json), which
@@ -76,18 +76,6 @@ def show_csvs(kind):
     return found
 
 
-def build_compiled_results(flag_files):
-    """Recreate the artifact layout generate_email_body.sh consumes in CI.
-
-    The script walks compiled-results/<name>_results/flags/, which the real
-    workflow assembles by downloading one artifact per processed session.
-    """
-    target = SANDBOX / 'compiled-results' / f'{SUBJECT}_{SESSION}_results' / 'flags'
-    target.mkdir(parents=True, exist_ok=True)
-    for f in flag_files:
-        shutil.copy(f, target / f.name)
-
-
 def main():
     rule('1. Synthetic input')
     raw_file = build_sandbox()
@@ -104,31 +92,8 @@ def main():
 
     rule('4. Flags')
     flag_files = show_csvs('flags')
-
-    rule('5. QC report email')
     if not flag_files:
-        print("  No flags raised, so there is nothing to report.")
-        return
-    build_compiled_results(flag_files)
-    env = dict(
-        os.environ,
-        GITHUB_EVENT_NAME='workflow_dispatch',
-        GITHUB_RUN_ID='0',
-        GITHUB_REPOSITORY='margot-mitchell/rdoc-fmri-behavioral-qc',
-        GITHUB_SERVER_URL='https://github.com',
-        SUBJECTS_PROCESSED=SUBJECT,
-        SESSIONS_PROCESSED=f'{SUBJECT}/{SESSION}',
-    )
-    proc = subprocess.run(
-        ['bash', str(REPO_ROOT / 'generate_email_body.sh')],
-        cwd=SANDBOX, env=env, capture_output=True, text=True,
-    )
-    body = SANDBOX / 'email_body.txt'
-    if proc.returncode != 0 or not body.exists():
-        print(proc.stdout, proc.stderr, sep='\n')
-        sys.exit(1)
-    for line in body.read_text().splitlines():
-        print(f"  {line}")
+        print("  No flags raised.")
 
     print(f"\n  Sandbox left at {SANDBOX.relative_to(REPO_ROOT)} for inspection."
           f"  Remove with: make clean")
